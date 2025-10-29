@@ -1,0 +1,51 @@
+# CuTeKernelLib Configuration File
+
+# Build Configuration
+build:
+  mode: release              # debug | release
+  optimization: O3           # O0 | O1 | O2 | O3
+  cuda_arch: auto            # auto | sm_80 | sm_86 | sm_89 | sm_90
+
+# Benchmark Configuration
+benchmark:
+  warmup_runs: 10
+  measurement_runs: 100
+  batch_sizes: [256, 512, 1024, 2048, 4096]
+  data_types: [float32, float16]
+
+# Profiling Configuration
+profiling:
+  ncu_metrics:
+    - sm__throughput.avg.pct_of_peak_sustained_elapsed
+    - dram__throughput.avg.pct_of_peak_sustained_elapsed
+    - sm__sass_thread_inst_executed_op_fadd_pred_on.sum
+    - sm__sass_thread_inst_executed_op_fmul_pred_on.sum
+    - sm__sass_thread_inst_executed_op_ffma_pred_on.sum
+    - smsp__sass_average_data_bytes_per_sector_mem_global_op_ld.pct
+    - smsp__sass_average_data_bytes_per_sector_mem_global_op_st.pct
+    - sm__inst_executed_pipe_tensor.sum
+  sections:
+    - SpeedOfLight
+    - MemoryWorkloadAnalysis
+    - ComputeWorkloadAnalysis
+    - Occupancy
+
+# Operator Configuration
+operators:
+  elementwise_add:
+    enabled: true
+    sizes: [256, 512, 1024, 2048, 4096]
+  gemm:
+    enabled: true
+    tile_sizes: [16, 32, 64]
+    matrix_sizes: [256, 512, 1024, 2048, 4096]
+  fft:
+    enabled: false
+    sizes: [1024, 2048, 4096, 8192]
+  conv2d:
+    enabled: false
+    channels: [32, 64, 128]
+    kernel_sizes: [3, 5, 7]
+  reduction:
+    enabled: false
+    sizes: [1024, 2048, 4096, 8192]

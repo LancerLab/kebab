@@ -1,0 +1,7 @@
+[submodule "third_party/cute"]
+	path = third_party/cute
+	url = git@github.com:codes1gn/cute-kernel-bench.git
+
+[submodule "third_party/yaml-cpp"]
+	path = third_party/yaml-cpp
+	url = https://github.com/jbeder/yaml-cpp.git
