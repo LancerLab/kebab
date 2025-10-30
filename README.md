@@ -25,12 +25,23 @@ CuTeKernelLib provides modular, high-performance GPU operator implementations us
 ## Prerequisites
 
 - NVIDIA GPU with compute capability ≥ 7.5 (Turing or newer)
-- CUDA Toolkit 11.0 or later
+- CUDA Toolkit 11.0 or later (automatically detected)
 - NVIDIA drivers with nvidia-smi available
 - GNU Make
 - Git (for dependency installation)
 - Python 3.6+ (for report generation)
-- yaml-cpp library
+- yaml-cpp library (automatically built during setup)
+
+### CUDA Auto-Detection
+
+The Makefile automatically detects and configures:
+- **CUDA Installation Path**: Searches standard locations (`/usr/local/cuda`, etc.)
+- **NVCC Compiler**: Automatically located in CUDA bin directory
+- **GPU Architecture**: Detected via `nvidia-smi` (e.g., sm_90 for H100)
+- **Nsight Compute (ncu)**: Auto-detected for profiling support
+- **nvidia-smi**: Located for GPU information queries
+
+Run `make help` or `make gpu-info` to see detected configuration. See [CUDA_AUTO_DETECTION.md](CUDA_AUTO_DETECTION.md) for details.
 
 ## Quick Start
 
@@ -137,6 +148,65 @@ make tune-gemm
 # - Memory Bandwidth: >80% of peak for memory-bound regions
 # - Occupancy: 50-100% depending on register/shared memory usage
 # - Pipeline Efficiency: Overlap between compute and memory operations
+```
+
+## CuTe GEMM Implementation
+
+### Current Status
+
+The library includes two GEMM implementations:
+
+1. **`gemm.cu` (Legacy)**: Raw CUDA implementation
+   - ❌ Does NOT use CuTe properly (only includes headers)
+   - Uses manual indexing and shared memory management
+   - No Tensor Core utilization
+   - ~30-40% of cuBLAS performance
+
+2. **`gemm_cute_hopper.cu` (NEW)**: Proper CuTe implementation
+   - ✅ Uses CuTe Layout and Tensor abstractions
+   - ✅ Hierarchical tiling with compile-time optimization
+   - ✅ Designed for Hopper (SM90) architecture
+   - 🚧 Advanced features in progress (see below)
+
+### CuTe Features Used
+
+- **Layout Abstraction**: `make_layout()` for memory layout description
+- **Tensor Abstraction**: `make_tensor()` for multi-dimensional arrays
+- **Tiling**: `local_tile()` for hierarchical decomposition
+- **Partitioning**: `local_partition()` for thread-level work distribution
+
+### Hopper (SM90) Features
+
+#### ✅ Implemented
+- Larger tile sizes (128x128) for better amortization
+- CuTe layout system with compile-time optimization
+- Hierarchical CTA and thread-level tiling
+
+#### 🚧 Not Yet Implemented
+- **WGMMA**: Warp Group Matrix Multiply-Accumulate (2x throughput vs Ampere)
+- **TMA**: Tensor Memory Accelerator for async bulk transfers
+- **Thread Block Clusters**: Distributed shared memory across CTAs
+- **Async Pipeline**: Multi-stage pipelining for latency hiding
+- **Swizzled Layouts**: Bank conflict-free shared memory access
+- **FP8/FP16 Tensor Cores**: Lower precision for higher throughput
+
+### Documentation
+
+- **Feature Analysis**: [`src/operators/README_GEMM_CUTE.md`](src/operators/README_GEMM_CUTE.md)
+  - Detailed explanation of each CuTe feature
+  - Hopper architecture capabilities
+  - Implementation examples with code snippets
+  - Performance optimization checklist
+  
+- **Implementation Guide**: [`docs/CUTE_GEMM_IMPLEMENTATION.md`](docs/CUTE_GEMM_IMPLEMENTATION.md)
+  - Comparison between raw CUDA and CuTe approaches
+  - Step-by-step implementation roadmap
+  - Learning resources and references
+  
+- **Status Tracking**: [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md)
+  - Feature implementation matrix
+  - Performance targets and benchmarks
+  - Next steps and priorities
 ```
 
 ### 5. Verify Installation

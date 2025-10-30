@@ -1,7 +1,7 @@
 # CuTeKernelLib Benchmark Results
 
 **GPU**: NVIDIA H800 PCIe (sm_90)
-**Generated**: 2025-10-30 11:36:15
+**Generated**: 2025-10-30 17:07:33
 **Operators tested**: 1
 **Total benchmarks**: 20
 
@@ -9,7 +9,7 @@
 
 | Operator | Best CuTe Speedup | Avg CuTe Speedup | Status |
 |----------|-------------------|------------------|--------|
-| elementwise_add | 0.94x | 0.93x | ⚠️ Needs optimization |
+| elementwise_add | 0.96x | 0.94x | ⚠️ Needs optimization |
 
 ## Elementwise_Add Performance
 
@@ -17,30 +17,30 @@
 |------------|---------|--------------|---------------------|----------|
 | 256 | CUDA | 0.002 | 1.3 | 1.00x |
 | 256 | CUDA | 0.002 | 0.7 | 1.00x |
-| 256 | CuTe | 0.002 | 1.2 | 0.94x |
-| 256 | CuTe | 0.002 | 0.6 | 0.93x |
+| 256 | CuTe | 0.002 | 1.2 | 0.96x |
+| 256 | CuTe | 0.002 | 0.6 | 0.94x |
 | 512 | CUDA | 0.002 | 2.7 | 1.00x |
 | 512 | CUDA | 0.002 | 1.3 | 1.00x |
 | 512 | CuTe | 0.002 | 2.5 | 0.93x |
 | 512 | CuTe | 0.002 | 1.3 | 0.94x |
 | 1,024 | CUDA | 0.002 | 5.3 | 1.00x |
-| 1,024 | CUDA | 0.002 | 2.7 | 1.00x |
-| 1,024 | CuTe | 0.003 | 4.9 | 0.92x |
-| 1,024 | CuTe | 0.002 | 2.5 | 0.93x |
+| 1,024 | CUDA | 0.002 | 2.6 | 1.00x |
+| 1,024 | CuTe | 0.002 | 4.9 | 0.94x |
+| 1,024 | CuTe | 0.002 | 2.5 | 0.94x |
 | 2,048 | CUDA | 0.002 | 10.4 | 1.00x |
 | 2,048 | CUDA | 0.002 | 5.3 | 1.00x |
-| 2,048 | CuTe | 0.003 | 9.7 | 0.93x |
-| 2,048 | CuTe | 0.002 | 5.0 | 0.94x |
-| 4,096 | CUDA | 0.002 | 20.8 | 1.00x |
-| 4,096 | CUDA | 0.002 | 10.3 | 1.00x |
-| 4,096 | CuTe | 0.003 | 19.5 | 0.94x |
-| 4,096 | CuTe | 0.003 | 9.4 | 0.92x |
+| 2,048 | CuTe | 0.002 | 9.8 | 0.95x |
+| 2,048 | CuTe | 0.002 | 4.9 | 0.93x |
+| 4,096 | CUDA | 0.002 | 20.9 | 1.00x |
+| 4,096 | CUDA | 0.002 | 10.4 | 1.00x |
+| 4,096 | CuTe | 0.003 | 19.6 | 0.94x |
+| 4,096 | CuTe | 0.003 | 9.4 | 0.91x |
 
 **Performance Summary:**
-- Average CuTe speedup: 0.93x
-- Best CuTe speedup: 0.94x
-- Worst CuTe speedup: 0.92x
-- ⚠️ CuTe implementation underperforms baseline by 7.2%
+- Average CuTe speedup: 0.94x
+- Best CuTe speedup: 0.96x
+- Worst CuTe speedup: 0.91x
+- ⚠️ CuTe implementation underperforms baseline by 6.7%
 
 ---
 

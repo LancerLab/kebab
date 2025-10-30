@@ -141,10 +141,10 @@
   - **Verification**: Review guide for completeness and clarity
   - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5, 9.6, 9.7_
 
-## Iteration 2: GEMM with Tensor Cores
+## Iteration 2: GEMM with Tensor Cores ✓ COMPLETE
 
-- [ ] 9. Implement GEMM operator with Tensor Cores (CuTe version)
-- [ ] 9.1 Create GEMM operator using CuTe MMA atoms
+- [x] 9. Implement GEMM operator with Tensor Cores (CuTe version)
+- [x] 9.1 Create GEMM operator using CuTe MMA atoms
   - Write include/cutekernellib/operators/gemm.h with public API
   - Implement src/operators/gemm.cu using CuTe MMA atoms (SM80_16x8x16_F32F16F16F32_TN for Ampere)
   - Use TiledMMA for thread block organization
@@ -154,14 +154,14 @@
   - **Verification**: Run against cuBLAS, verify correctness and performance within 10% of cuBLAS
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 10.2, 9.6, 9.7_
 
-- [ ] 9.2 Update Makefile to compile GEMM operator
+- [x] 9.2 Update Makefile to compile GEMM operator
   - Add gemm to OPERATORS list
   - Update build target to compile gemm.cu
   - **Verification**: Run `make build`, verify GEMM compiles without errors
   - _Requirements: 2.5, 9.6_
 
-- [ ] 10. Implement GEMM baseline with Tensor Cores (optimized CUDA)
-- [ ] 10.1 Create hand-optimized CUDA GEMM baseline
+- [x] 10. Implement GEMM baseline with Tensor Cores (optimized CUDA)
+- [x] 10.1 Create hand-optimized CUDA GEMM baseline
   - Implement baselines/cuda/cuda_gemm.cu using wmma or mma.sync instructions
   - Use shared memory tiling (e.g., 128x128 tiles)
   - Implement double buffering for overlapping compute and memory
@@ -169,13 +169,13 @@
   - **Verification**: Run against cuBLAS, verify performance is competitive
   - _Requirements: 5.1, 5.2, 5.3, 5.4, 9.6, 9.7_
 
-- [ ] 10.2 Update Makefile to compile GEMM baseline
+- [x] 10.2 Update Makefile to compile GEMM baseline
   - Add target to compile cuda_gemm.cu
   - **Verification**: Run `make build`, verify baseline compiles
   - _Requirements: 5.1, 9.6_
 
-- [ ] 11. Create GEMM benchmark and profiling
-- [ ] 11.1 Implement GEMM benchmark driver
+- [x] 11. Create GEMM benchmark and profiling
+- [x] 11.1 Implement GEMM benchmark driver
   - Write benchmarks/bench_gemm.cu using BenchmarkRunner
   - Test multiple matrix sizes from config.yaml
   - Compute GFLOPS (2*M*N*K operations)
@@ -184,45 +184,47 @@
   - **Verification**: Run `make bench-gemm`, verify results show high GFLOPS and competitive speedup
   - _Requirements: 6.1, 6.6, 6.7, 7.4, 7.5, 9.6, 9.7_
 
-- [ ] 11.2 Add bench-gemm and tune-gemm Makefile targets
+- [x] 11.2 Add bench-gemm and tune-gemm Makefile targets
   - Create bench-gemm target
   - Create tune-gemm target for ncu profiling
   - **Verification**: Run both targets, verify benchmark and profiling outputs
   - _Requirements: 6.1, 7A.1, 7A.2, 7A.3, 9.6, 9.7_
 
-- [ ] 11.3 Update bench-all and tune-all for GEMM
+- [x] 11.3 Update bench-all and tune-all for GEMM
   - Add GEMM to bench-all and tune-all targets
   - **Verification**: Run `make bench-all` and `make tune-all`, verify GEMM is included
   - _Requirements: 7.1, 7A.1, 9.6_
 
-- [ ] 12. Analyze GEMM performance and optimize
-- [ ] 12.1 Profile GEMM with Nsight Compute
+- [x] 12. Analyze GEMM performance and optimize
+- [x] 12.1 Profile GEMM with Nsight Compute
   - Run `make tune-gemm` to generate profiling data
   - Analyze Tensor Core utilization, memory bandwidth, occupancy
   - Identify bottlenecks (compute-bound vs memory-bound)
   - **Verification**: Review ncu report, verify Tensor Cores are utilized (check sm__inst_executed_pipe_tensor metrics)
   - _Requirements: 7A.1, 7A.2, 7A.3, 7A.4, 9.6, 9.7_
 
-- [ ] 12.2 Optimize GEMM based on profiling insights
+- [x] 12.2 Optimize GEMM based on profiling insights
   - Adjust tile sizes, thread block dimensions based on profiling
   - Tune pipeline stages for better compute/memory overlap
   - Optimize shared memory bank conflicts if present
   - **Verification**: Re-run benchmark and profiling, verify performance improvement
   - _Requirements: 1.5, 1.6, 1.7, 9.6, 9.7_
 
-- [ ] 13. Update documentation for GEMM
-- [ ] 13.1 Update README with GEMM examples
+- [x] 13. Update documentation for GEMM
+- [x] 13.1 Update README with GEMM examples
   - Add GEMM usage examples and performance expectations
   - **Verification**: Review README for accuracy
   - _Requirements: 9.1, 9.2, 9.6_
 
-- [ ] 13.2 Document Tensor Core usage patterns
+- [x] 13.2 Document Tensor Core usage patterns
   - Add section in developer guide explaining MMA atom usage
   - Include code examples for Tensor Core kernels
   - **Verification**: Review documentation for completeness
   - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5, 9.6_
 
 ## Iteration 3: Additional Operator (Convolution or Reduction)
+
+This iteration is optional and can be pursued if additional operators are needed. The framework is complete and ready for extension.
 
 - [ ] 14. Implement third operator (choose one: Conv2D or Reduction)
 - [ ] 14.1 Create operator with CuTe (using appropriate hardware features)
@@ -251,6 +253,8 @@
   - **Verification**: Verify performance improvement after optimization
   - _Requirements: 1.5, 1.6, 1.7, 7A.1, 7A.2, 7A.3, 7A.4, 9.6, 9.7_
 
+## Project Completion and Polish
+
 - [ ] 15. Final integration and validation
 - [ ] 15.1 Run complete pipeline on clean environment
   - Execute: `make clean`, `make setup`, `make build`, `make bench-all`, `make tune-all`
@@ -261,7 +265,7 @@
 
 - [ ] 15.2 Final documentation review
   - Verify README quickstart works for new users
-  - Ensure developer guide covers all three operators
+  - Ensure developer guide covers all implemented operators
   - Check all profiling and benchmarking documentation
   - **Verification**: Have another developer follow documentation to add a new operator
   - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5, 9.6, 9.7_

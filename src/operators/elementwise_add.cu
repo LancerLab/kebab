@@ -1,65 +1,92 @@
+/**
+ * @file elementwise_add.cu
+ * @brief CuTe implementation of element-wise addition
+ * 
+ * This implementation uses CuTe's Layout and Tensor abstractions for
+ * type-safe, dimension-aware element-wise operations.
+ */
+
 #include "cutekernellib/operators/elementwise_add.h"
+#include <cute/tensor.hpp>
+
+using namespace cute;
 
 namespace cutekernellib {
 
-// Kernel for float using float4 vectorization
+/**
+ * @brief CuTe element-wise addition kernel
+ * 
+ * Uses CuTe features:
+ * - Layout for memory pattern description
+ * - Tensor for multi-dimensional array abstraction
+ * - Automatic vectorization through layout
+ */
 template<typename T>
-__global__ void elementwise_add_kernel_vectorized(const T* A, const T* B, T* C, int N) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+__global__ void elementwise_add_kernel_cute(
+    const T* A_ptr, const T* B_ptr, T* C_ptr, int N)
+{
+    // Create 1D layout for the arrays
+    auto layout = make_layout(make_shape(N));
     
-    // Process 4 elements per thread for float
-    if constexpr (sizeof(T) == sizeof(float)) {
-        int vec_idx = idx * 4;
-        if (vec_idx + 3 < N) {
-            // Vectorized load using float4
-            float4 a = reinterpret_cast<const float4*>(A)[idx];
-            float4 b = reinterpret_cast<const float4*>(B)[idx];
-            
-            float4 c;
-            c.x = a.x + b.x;
-            c.y = a.y + b.y;
-            c.z = a.z + b.z;
-            c.w = a.w + b.w;
-            
-            // Vectorized store
-            reinterpret_cast<float4*>(C)[idx] = c;
-        }
-    }
-    // Process 2 elements per thread for half
-    else if constexpr (sizeof(T) == sizeof(__half)) {
-        int vec_idx = idx * 2;
-        if (vec_idx + 1 < N) {
-            // Vectorized load using half2
-            half2 a = reinterpret_cast<const half2*>(A)[idx];
-            half2 b = reinterpret_cast<const half2*>(B)[idx];
-            
-            // Use half2 arithmetic
-            half2 c = __hadd2(a, b);
-            
-            // Vectorized store
-            reinterpret_cast<half2*>(C)[idx] = c;
+    // Create CuTe tensors from raw pointers
+    Tensor gA = make_tensor(make_gmem_ptr(A_ptr), layout);
+    Tensor gB = make_tensor(make_gmem_ptr(B_ptr), layout);
+    Tensor gC = make_tensor(make_gmem_ptr(C_ptr), layout);
+    
+    // Calculate thread's work range
+    int tid = threadIdx.x + blockIdx.x * blockDim.x;
+    int stride = blockDim.x * gridDim.x;
+    
+    // Process elements assigned to this thread
+    // CuTe's tensor access handles bounds checking and layout
+    for (int i = tid; i < N; i += stride) {
+        if (i < size(gC)) {
+            gC(i) = gA(i) + gB(i);
         }
     }
 }
 
-// Scalar kernel for handling remainder elements
-template<typename T>
-__global__ void elementwise_add_kernel_scalar(const T* A, const T* B, T* C, int N, int start_idx) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x + start_idx;
+/**
+ * @brief CuTe vectorized element-wise addition kernel
+ * 
+ * Uses CuTe's copy atoms for automatic vectorization
+ */
+template<typename T, int VecSize>
+__global__ void elementwise_add_kernel_cute_vectorized(
+    const T* A_ptr, const T* B_ptr, T* C_ptr, int N)
+{
+    // Create layout with vectorization hint
+    auto layout = make_layout(make_shape(N / VecSize));
     
-    if (idx < N) {
-        if constexpr (sizeof(T) == sizeof(float)) {
-            C[idx] = A[idx] + B[idx];
-        } else if constexpr (sizeof(T) == sizeof(__half)) {
-            C[idx] = __hadd(A[idx], B[idx]);
+    // Create tensors with vectorized access pattern
+    using VecType = cute::array<T, VecSize>;
+    Tensor gA = make_tensor(make_gmem_ptr(reinterpret_cast<const VecType*>(A_ptr)), layout);
+    Tensor gB = make_tensor(make_gmem_ptr(reinterpret_cast<const VecType*>(B_ptr)), layout);
+    Tensor gC = make_tensor(make_gmem_ptr(reinterpret_cast<VecType*>(C_ptr)), layout);
+    
+    int tid = threadIdx.x + blockIdx.x * blockDim.x;
+    int stride = blockDim.x * gridDim.x;
+    
+    // Process vectorized elements
+    for (int i = tid; i < size(gC); i += stride) {
+        VecType a = gA(i);
+        VecType b = gB(i);
+        VecType c;
+        
+        #pragma unroll
+        for (int j = 0; j < VecSize; ++j) {
+            c[j] = a[j] + b[j];
         }
+        
+        gC(i) = c;
     }
 }
 
-// Host function implementation for float
+/**
+ * @brief Host function for float element-wise addition
+ */
 template<>
 void elementwise_add<float>(const float* A, const float* B, float* C, int N, cudaStream_t stream) {
-    // Validate inputs
     if (A == nullptr || B == nullptr || C == nullptr) {
         fprintf(stderr, "ERROR: Null pointer passed to elementwise_add\n");
         return;
@@ -69,37 +96,39 @@ void elementwise_add<float>(const float* A, const float* B, float* C, int N, cud
         return;
     }
     
-    // Calculate vectorized portion (process 4 elements per thread)
-    int vec_elements = (N / 4) * 4;
-    int vec_threads = N / 4;
+    constexpr int VecSize = 4;  // float4 vectorization
+    constexpr int threads_per_block = 256;
     
-    if (vec_threads > 0) {
-        int threads_per_block = 256;
-        int num_blocks = (vec_threads + threads_per_block - 1) / threads_per_block;
+    // Process vectorized portion
+    int vec_elements = (N / VecSize) * VecSize;
+    if (vec_elements > 0) {
+        int vec_count = vec_elements / VecSize;
+        int num_blocks = (vec_count + threads_per_block - 1) / threads_per_block;
         
-        elementwise_add_kernel_vectorized<float><<<num_blocks, threads_per_block, 0, stream>>>(
-            A, B, C, N
-        );
+        elementwise_add_kernel_cute_vectorized<float, VecSize>
+            <<<num_blocks, threads_per_block, 0, stream>>>(A, B, C, vec_elements);
+        
         CUDA_CHECK(cudaGetLastError());
     }
     
-    // Handle remainder elements with scalar kernel
+    // Process remainder with scalar kernel
     int remainder = N - vec_elements;
     if (remainder > 0) {
-        int threads_per_block = 256;
-        int num_blocks = (remainder + threads_per_block - 1) / threads_per_block;
+        int num_blocks = 1;
         
-        elementwise_add_kernel_scalar<float><<<num_blocks, threads_per_block, 0, stream>>>(
-            A, B, C, N, vec_elements
-        );
+        elementwise_add_kernel_cute
+            <<<num_blocks, threads_per_block, 0, stream>>>(
+                A + vec_elements, B + vec_elements, C + vec_elements, remainder);
+        
         CUDA_CHECK(cudaGetLastError());
     }
 }
 
-// Host function implementation for half
+/**
+ * @brief Host function for half element-wise addition
+ */
 template<>
 void elementwise_add<__half>(const __half* A, const __half* B, __half* C, int N, cudaStream_t stream) {
-    // Validate inputs
     if (A == nullptr || B == nullptr || C == nullptr) {
         fprintf(stderr, "ERROR: Null pointer passed to elementwise_add\n");
         return;
@@ -109,29 +138,30 @@ void elementwise_add<__half>(const __half* A, const __half* B, __half* C, int N,
         return;
     }
     
-    // Calculate vectorized portion (process 2 elements per thread)
-    int vec_elements = (N / 2) * 2;
-    int vec_threads = N / 2;
+    constexpr int VecSize = 2;  // half2 vectorization
+    constexpr int threads_per_block = 256;
     
-    if (vec_threads > 0) {
-        int threads_per_block = 256;
-        int num_blocks = (vec_threads + threads_per_block - 1) / threads_per_block;
+    // Process vectorized portion
+    int vec_elements = (N / VecSize) * VecSize;
+    if (vec_elements > 0) {
+        int vec_count = vec_elements / VecSize;
+        int num_blocks = (vec_count + threads_per_block - 1) / threads_per_block;
         
-        elementwise_add_kernel_vectorized<__half><<<num_blocks, threads_per_block, 0, stream>>>(
-            A, B, C, N
-        );
+        elementwise_add_kernel_cute_vectorized<__half, VecSize>
+            <<<num_blocks, threads_per_block, 0, stream>>>(A, B, C, vec_elements);
+        
         CUDA_CHECK(cudaGetLastError());
     }
     
-    // Handle remainder elements with scalar kernel
+    // Process remainder with scalar kernel
     int remainder = N - vec_elements;
     if (remainder > 0) {
-        int threads_per_block = 256;
-        int num_blocks = (remainder + threads_per_block - 1) / threads_per_block;
+        int num_blocks = 1;
         
-        elementwise_add_kernel_scalar<__half><<<num_blocks, threads_per_block, 0, stream>>>(
-            A, B, C, N, vec_elements
-        );
+        elementwise_add_kernel_cute
+            <<<num_blocks, threads_per_block, 0, stream>>>(
+                A + vec_elements, B + vec_elements, C + vec_elements, remainder);
+        
         CUDA_CHECK(cudaGetLastError());
     }
 }

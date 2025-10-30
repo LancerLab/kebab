@@ -195,8 +195,14 @@ int main(int argc, char** argv) {
         std::cout << "Compute Capability: " << prop.major << "." << prop.minor << std::endl;
         std::cout << "Memory: " << (prop.totalGlobalMem / (1024.0 * 1024.0 * 1024.0)) 
                   << " GB" << std::endl;
+        
+        // Get memory clock rate using cudaDeviceGetAttribute (for CUDA 12+ compatibility)
+        int memoryClockRate = 0;
+        int memoryBusWidth = 0;
+        cudaDeviceGetAttribute(&memoryClockRate, cudaDevAttrMemoryClockRate, 0);
+        cudaDeviceGetAttribute(&memoryBusWidth, cudaDevAttrGlobalMemoryBusWidth, 0);
         std::cout << "Memory Bandwidth: " 
-                  << (2.0 * prop.memoryClockRate * (prop.memoryBusWidth / 8) / 1.0e6) 
+                  << (2.0 * memoryClockRate * (memoryBusWidth / 8) / 1.0e6) 
                   << " GB/s" << std::endl;
         std::cout << "========================================" << std::endl;
         
