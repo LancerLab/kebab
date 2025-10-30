@@ -42,6 +42,10 @@ public:
         if (!config.IsDefined() && !config_path.empty()) {
             config = YAML::LoadFile(config_path);
         }
+        // Always return a fresh copy to avoid node invalidation issues
+        if (!config_path.empty()) {
+            return YAML::LoadFile(config_path);
+        }
         return config;
     }
     
