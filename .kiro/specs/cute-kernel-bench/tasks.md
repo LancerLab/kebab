@@ -8,7 +8,7 @@
 3. **Iterative Development**: Complete one full operator per iteration (framework + operator + baseline + benchmark + profiling)
 4. **Maximum Performance**: Use Tensor Cores (mma.sync/MMA atoms), async copy, TMA, pipelining - target ≥90% of vendor library performance
 
-## Iteration 1: Framework + Element-wise Add Operator
+## Iteration 1: Framework + Element-wise Add Operator ✓ COMPLETE
 
 - [x] 1. Set up project structure and build system foundation
   - Create directory structure: include/cutekernellib/operators/, src/operators/, src/config/, baselines/cuda/, benchmarks/, third_party/, build/, bench_results/, profiling/
@@ -16,7 +16,7 @@
   - Create README.md with project overview
   - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 4.1_
 
-- [-] 2. Implement Makefile with GPU detection and core targets
+- [x] 2. Implement Makefile with GPU detection and core targets
 - [x] 2.1 Create Makefile with GPU architecture detection
   - Implement CUDA_ARCH detection using nvidia-smi shell command in Makefile
   - Add OS detection (Linux/Windows) using Make's shell function
@@ -32,7 +32,7 @@
   - **Verification**: Run `make setup` on clean environment, verify third_party/cute/ exists with CuTe headers
   - _Requirements: 2.3, 2.4, 10.1, 10.4, 9.6, 9.7_
 
-- [ ] 2.3 Implement configuration parser with yaml-cpp
+- [x] 2.3 Implement configuration parser with yaml-cpp
   - Write include/cutekernellib/config/config_parser.h with ConfigParser singleton class
   - Implement src/config/config_parser.cpp with yaml-cpp to parse config.yaml
   - Add methods: getBuildMode(), getWarmupRuns(), getMeasurementRuns(), getBatchSizes(), getProfilingMetrics()
@@ -40,15 +40,15 @@
   - **Verification**: Create test program that loads config.yaml and prints parsed values
   - _Requirements: 4.2, 4.3, 4.4, 4.5, 9.6_
 
-- [ ] 2.4 Add build target to compile configuration parser
+- [x] 2.4 Add build target to compile configuration parser
   - Implement build target in Makefile to compile config_parser.cpp
   - Link yaml-cpp library (build from source if needed)
   - Generate libcutekernellib_config.a
   - **Verification**: Run `make build`, verify library is created in build/ directory
   - _Requirements: 2.5, 2.6, 4.5, 9.6_
 
-- [ ] 3. Implement element-wise add operator (CuTe version)
-- [ ] 3.1 Create element-wise add operator with vectorized memory access
+- [x] 3. Implement element-wise add operator (CuTe version)
+- [x] 3.1 Create element-wise add operator with vectorized memory access
   - Write include/cutekernellib/operators/elementwise_add.h with public API
   - Implement src/operators/elementwise_add.cu using CuTe for vectorized loads/stores
   - Use vector types (float4, half2) for memory coalescing
@@ -57,27 +57,27 @@
   - **Verification**: Compile operator, run simple host program to verify correctness against CPU reference
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 10.2, 9.6, 9.7_
 
-- [ ] 3.2 Update Makefile to compile element-wise add operator
+- [x] 3.2 Update Makefile to compile element-wise add operator
   - Add elementwise_add to OPERATORS list in Makefile
   - Update build target to compile elementwise_add.cu and link into libcutekernellib.a
   - **Verification**: Run `make build`, verify no compilation errors, library includes operator
   - _Requirements: 2.5, 9.6_
 
-- [ ] 4. Implement element-wise add baseline (optimized CUDA)
-- [ ] 4.1 Create hand-optimized CUDA baseline for element-wise add
+- [x] 4. Implement element-wise add baseline (optimized CUDA)
+- [x] 4.1 Create hand-optimized CUDA baseline for element-wise add
   - Implement baselines/cuda/cuda_elementwise_add.cu with vectorized memory access
   - Use same API signature as CuTe version for fair comparison
   - Optimize with: vector loads/stores, grid-stride loops, proper block sizing
   - **Verification**: Compile and run standalone test, verify correctness and performance
   - _Requirements: 5.1, 5.2, 5.3, 5.4, 9.6, 9.7_
 
-- [ ] 4.2 Update Makefile to compile CUDA baseline
+- [x] 4.2 Update Makefile to compile CUDA baseline
   - Add target to compile cuda_elementwise_add.cu
   - **Verification**: Run `make build`, verify baseline compiles successfully
   - _Requirements: 5.1, 9.6_
 
-- [ ] 5. Implement benchmarking framework
-- [ ] 5.1 Create benchmark runner infrastructure with CUDA events
+- [x] 5. Implement benchmarking framework
+- [x] 5.1 Create benchmark runner infrastructure with CUDA events
   - Write benchmarks/benchmark_runner.h with BenchmarkRunner class
   - Implement measureLatency() using cudaEvent timing with warmup and measurement phases
   - Implement calculateThroughput() for bandwidth calculation (GB/s)
@@ -85,7 +85,7 @@
   - **Verification**: Create simple test that times a dummy kernel, verify timing is reasonable
   - _Requirements: 6.2, 6.3, 6.4, 6.5, 9.6_
 
-- [ ] 5.2 Create element-wise add benchmark driver
+- [x] 5.2 Create element-wise add benchmark driver
   - Implement benchmarks/bench_elementwise_add.cu using BenchmarkRunner
   - Benchmark both CuTe and CUDA baseline across batch sizes from config.yaml
   - Compute speedup ratio and bandwidth utilization
@@ -93,14 +93,14 @@
   - **Verification**: Run benchmark manually, verify CSV is generated with valid data
   - _Requirements: 6.1, 6.6, 6.7, 7.4, 7.5, 9.6, 9.7_
 
-- [ ] 5.3 Add bench-elementwise_add Makefile target
+- [x] 5.3 Add bench-elementwise_add Makefile target
   - Create bench-elementwise_add target to compile and run benchmark
   - Parse config.yaml for benchmark parameters
   - **Verification**: Run `make bench-elementwise_add`, verify benchmark executes and generates results
   - _Requirements: 6.1, 9.6, 9.7_
 
-- [ ] 6. Implement profiling system with Nsight Compute
-- [ ] 6.1 Add tune-elementwise_add Makefile target
+- [x] 6. Implement profiling system with Nsight Compute
+- [x] 6.1 Add tune-elementwise_add Makefile target
   - Create tune-elementwise_add target to run ncu profiler on operator
   - Generate ncu-rep file in profiling/ directory
   - Extract summary metrics to text file
@@ -108,33 +108,33 @@
   - **Verification**: Run `make tune-elementwise_add`, verify .ncu-rep and summary.txt are generated
   - _Requirements: 7A.1, 7A.2, 7A.3, 7A.4, 7A.5, 9.6, 9.7_
 
-- [ ] 6.2 Add tune-all Makefile target
+- [x] 6.2 Add tune-all Makefile target
   - Create tune-all target to profile all operators sequentially
   - **Verification**: Run `make tune-all`, verify profiling files for all operators
   - _Requirements: 7A.1, 9.6_
 
-- [ ] 7. Create report generation for element-wise add
-- [ ] 7.1 Implement Python script for benchmark report generation
+- [x] 7. Create report generation for element-wise add
+- [x] 7.1 Implement Python script for benchmark report generation
   - Write scripts/generate_report.py to parse CSV files
   - Generate Markdown table with operator, variant, batch size, latency, throughput, speedup
   - Output to bench_results/summary.md
   - **Verification**: Run script manually, verify summary.md is well-formatted
   - _Requirements: 7.2, 7.3, 9.6_
 
-- [ ] 7.2 Add bench-all Makefile target for iteration 1
+- [x] 7.2 Add bench-all Makefile target for iteration 1
   - Create bench-all target to run all benchmarks and generate summary
   - **Verification**: Run `make bench-all`, verify summary.md is generated with complete data
   - _Requirements: 7.1, 7.2, 7.3, 7.4, 7.5, 9.6, 9.7_
 
-- [ ] 8. Documentation for iteration 1
-- [ ] 8.1 Write README.md with quickstart guide
+- [x] 8. Documentation for iteration 1
+- [x] 8.1 Write README.md with quickstart guide
   - Add project overview, technology stack, and architecture summary
   - Include quickstart: `make setup`, `make build`, `make bench-elementwise_add`
   - Add troubleshooting section for GPU detection and dependency issues
   - **Verification**: Follow README on clean environment, verify all steps work
   - _Requirements: 9.1, 9.2, 9.3, 9.4, 10.3, 10.4, 9.6, 9.7_
 
-- [ ] 8.2 Create developer guide for adding operators
+- [x] 8.2 Create developer guide for adding operators
   - Document step-by-step process for adding new operators
   - Include code templates for operator, baseline, and benchmark
   - Explain Makefile integration and config.yaml extension
