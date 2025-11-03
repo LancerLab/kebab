@@ -460,9 +460,15 @@ $(BUILD_DIR)/gemm_wgmma.o: $(SRC_DIR)/operators/gemm_wgmma.cu
 	$(NVCC) $(NVCC_FLAGS) -c $< -o $@
 	@echo "  ✓ gemm_wgmma operator compiled"
 
+$(BUILD_DIR)/gemm_wgmma_tma.o: $(SRC_DIR)/operators/gemm_wgmma_tma.cu
+	@echo "Compiling gemm_wgmma_tma operator (Hopper WGMMA with TMA)..."
+	@$(MKDIR) $(BUILD_DIR)
+	$(NVCC) $(NVCC_FLAGS) -c $< -o $@
+	@echo "  ✓ gemm_wgmma_tma operator compiled"
+
 # Create operator library
 OPERATOR_OBJS := $(patsubst %,$(BUILD_DIR)/%.o,$(OPERATORS))
-OPERATOR_OBJS += $(BUILD_DIR)/gemm_wgmma.o
+OPERATOR_OBJS += $(BUILD_DIR)/gemm_wgmma.o $(BUILD_DIR)/gemm_wgmma_tma.o
 
 $(BUILD_DIR)/libcutekernellib.a: $(OPERATOR_OBJS)
 	@echo "Creating operator library..."

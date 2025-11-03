@@ -16,11 +16,18 @@
 
 namespace cutekernellib {
 
-// Forward declare WGMMA implementation
+// Forward declare WGMMA implementations
+// Version 1: WGMMA without TMA
 void gemm_wgmma_fp16_dispatch(const void* A, const void* B, void* C,
                               int M, int N, int K, 
                               char lhs_format, char rhs_format,
                               cudaStream_t stream);
+
+// Version 2: WGMMA with TMA (future)
+void gemm_wgmma_tma_fp16_dispatch(const void* A, const void* B, void* C,
+                                  int M, int N, int K, 
+                                  char lhs_format, char rhs_format,
+                                  cudaStream_t stream);
 
 /**
  * @brief Conversion kernels for FP32 <-> FP16
@@ -84,8 +91,21 @@ void gemm<float>(const float* A, const float* B, float* C,
     char lhs_format = (opmode_str.length() >= 1) ? opmode_str[0] : 'R';
     char rhs_format = (opmode_str.length() >= 2) ? opmode_str[1] : 'R';
     
-    // Run WGMMA with dispatch
-    gemm_wgmma_fp16_dispatch(d_A_fp16, d_B_fp16, d_C_fp16, M, N, K, lhs_format, rhs_format, stream);
+    // Version dispatch
+    switch (version) {
+        case 1:
+            // Version 1: WGMMA without TMA
+            gemm_wgmma_fp16_dispatch(d_A_fp16, d_B_fp16, d_C_fp16, M, N, K, lhs_format, rhs_format, stream);
+            break;
+        case 2:
+            // Version 2: WGMMA with TMA
+            gemm_wgmma_tma_fp16_dispatch(d_A_fp16, d_B_fp16, d_C_fp16, M, N, K, lhs_format, rhs_format, stream);
+            break;
+        default:
+            fprintf(stderr, "ERROR: Unsupported CuTe version %d for float\n", version);
+            fprintf(stderr, "       Available versions: 1 (WGMMA without TMA), 2 (WGMMA with TMA)\n");
+            exit(EXIT_FAILURE);
+    }
     
     // Convert back to FP32
     convert_fp16_to_fp32<<<(total_C + threads - 1) / threads, threads, 0, stream>>>(d_C_fp16, C, total_C);
@@ -122,8 +142,21 @@ void gemm<__half>(const __half* A, const __half* B, __half* C,
     char lhs_format = (opmode_str.length() >= 1) ? opmode_str[0] : 'R';
     char rhs_format = (opmode_str.length() >= 2) ? opmode_str[1] : 'R';
     
-    // Direct WGMMA call with dispatch
-    gemm_wgmma_fp16_dispatch(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+    // Version dispatch
+    switch (version) {
+        case 1:
+            // Version 1: WGMMA without TMA
+            gemm_wgmma_fp16_dispatch(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            break;
+        case 2:
+            // Version 2: WGMMA with TMA
+            gemm_wgmma_tma_fp16_dispatch(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            break;
+        default:
+            fprintf(stderr, "ERROR: Unsupported CuTe version %d for half\n", version);
+            fprintf(stderr, "       Available versions: 1 (WGMMA without TMA), 2 (WGMMA with TMA)\n");
+            exit(EXIT_FAILURE);
+    }
 }
 
 /**
