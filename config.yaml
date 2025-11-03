@@ -49,19 +49,19 @@ operators:
   gemm:
     enabled: true
     # Implementation: cuda (baseline) | cute (CuTe/WGMMA implementation)
-    impl: cuda
+    impl: cute
     # Version: kernel variant ID
     # cuda version 1: naive implementation (no tiling, no optimization)
     # cute version 1: WGMMA without TMA
-    # cute version 2: WGMMA with TMA (future)
+    # cute version 2: WGMMA with TMA
     # cute version 3: optimized tile sizes (future)
-    version: 1
+    version: 2
     # Initialization method for matrices A and B
     # Format: <A_init>-<B_init>
     # Options: one, rand, range, row, col
     init_method: rand-rand
     # Matrix sizes for benchmarking (M=N=K for square matrices)
-    matrix_sizes: [128, 256, 512, 1024, 2048]
+    matrix_sizes: [256, 512, 1024]
     # Operation modes: specify storage format of LHS and RHS
     # Format: <LHS_format><RHS_format>
     # - R: Row-major storage
