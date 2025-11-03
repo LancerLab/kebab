@@ -150,23 +150,34 @@ make tune-gemm
 # - Pipeline Efficiency: Overlap between compute and memory operations
 ```
 
+## Project Roadmap
+
+**Current Status**: Phase 1 Complete ✅
+
+See detailed roadmap: [`docs/TASK_ROADMAP.md`](docs/TASK_ROADMAP.md)
+
+**Next Phase**: GEMM Performance Optimization (Phase 2)
+- Phase 2A: WGMMA Tensor Cores (Target: 70-80% of cuBLAS)
+- Phase 2B: TMA Async Copy (Target: 80-90% of cuBLAS)
+- Phase 2C: Thread Block Clusters (Target: 90-95% of cuBLAS)
+- Phase 2D: FP8 & Final Optimization (Target: 95%+ of cuBLAS)
+
+Detailed tasks: [`.kiro/specs/cute-kernel-bench/tasks.md`](.kiro/specs/cute-kernel-bench/tasks.md)
+
 ## CuTe GEMM Implementation
 
 ### Current Status
 
-The library includes two GEMM implementations:
+The library includes a clean GEMM implementation:
 
-1. **`gemm.cu` (Legacy)**: Raw CUDA implementation
-   - ❌ Does NOT use CuTe properly (only includes headers)
-   - Uses manual indexing and shared memory management
-   - No Tensor Core utilization
-   - ~30-40% of cuBLAS performance
-
-2. **`gemm_cute_hopper.cu` (NEW)**: Proper CuTe implementation
-   - ✅ Uses CuTe Layout and Tensor abstractions
-   - ✅ Hierarchical tiling with compile-time optimization
-   - ✅ Designed for Hopper (SM90) architecture
-   - 🚧 Advanced features in progress (see below)
+**`gemm.cu`**: Clean, correct implementation (Phase 1)
+- ✅ Tiled matrix multiplication (64x64 tiles)
+- ✅ Shared memory optimization
+- ✅ All correctness tests passing
+- ✅ Performance: 12,327 GFLOPS (54% of cuBLAS for FP32)
+- 🚧 Tensor Cores: Phase 2A (in progress)
+- 🚧 TMA: Phase 2B (planned)
+- 🚧 Clusters: Phase 2C (planned)
 
 ### CuTe Features Used
 

@@ -41,36 +41,51 @@ using namespace nvcuda;
  * This kernel uses wmma API for Tensor Core acceleration.
  * Each warp computes a 16x16 output tile.
  */
+/**
+ * @brief WMMA kernel aligned with cuBLAS NT computation
+ *
+ * Computes: C[n,m] = sum_k B[k,n] * A[m,k]
+ * Stored at: C[n + m*N]
+ *
+ * This matches cuBLAS: cublasHgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T, N, M, K, alpha, B, N, A, M, beta, C, N)
+ * And matches WGMMA: gemm_tn(M, N, K, alpha, A, K, B, N, beta, C, M)
+ */
 __global__ void gemm_wmma_kernel_simple(
     const __half* __restrict__ A,
-    const __half* __restrict__ B, 
+    const __half* __restrict__ B,
     __half* __restrict__ C,
     int M, int N, int K)
 {
-    // Each block has one warp, each warp handles one 16x16 tile
-    int globalRowC = blockIdx.y * 16;
-    int globalColC = blockIdx.x * 16;
-    
+    // Each block handles one 16x16 tile
+    int globalRowM = blockIdx.y * 16;  // m index (0 to M-1)
+    int globalColN = blockIdx.x * 16;  // n index (0 to N-1)
+
     // Bounds check
-    if (globalRowC >= M || globalColC >= N) return;
-    
+    if (globalRowM >= M || globalColN >= N) return;
+
     // WMMA fragments
+    // We compute: C[n,m] = sum_k B[k,n] * A[m,k]
+    // A[m,k] is at A[m*K + k] - row-major, so we use row_major
+    // B[k,n] is at B[k*N + n] - row-major, so we use row_major
     wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> a_frag;
     wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::row_major> b_frag;
     wmma::fragment<wmma::accumulator, 16, 16, 16, __half> c_frag;
-    
+
     // Initialize accumulator to zero
     wmma::fill_fragment(c_frag, __float2half(0.0f));
-    
+
     // Loop over K dimension in steps of 16
     for (int k = 0; k < K; k += 16) {
         // Bounds check for K dimension
         if (k + 16 <= K) {
-            // Load A and B fragments
-            wmma::load_matrix_sync(a_frag, A + globalRowC * K + k, K);
-            wmma::load_matrix_sync(b_frag, B + k * N + globalColC, N);
-            
-            // Perform matrix multiplication
+            // Load A fragment: A[m,k] at A[m*K + k]
+            wmma::load_matrix_sync(a_frag, A + globalRowM * K + k, K);
+
+            // Load B fragment: B[k,n] at B[k*N + n]
+            // We need B^T[n,k] = B[k,n], so we load B in row-major and transpose
+            wmma::load_matrix_sync(b_frag, B + k * N + globalColN, N);
+
+            // Perform matrix multiplication: C += A * B^T
             wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
         } else {
             // Handle remaining K dimension with padding
@@ -78,16 +93,20 @@ __global__ void gemm_wmma_kernel_simple(
             break;
         }
     }
-    
-    // Store result
-    if (globalRowC + 16 <= M && globalColC + 16 <= N) {
-        wmma::store_matrix_sync(C + globalRowC * N + globalColC, c_frag, N, wmma::mem_row_major);
+
+    // Store result: C[n,m] at C[n + m*N]
+    // Using col_major storage means C[n,m] at C[n + m*ldC]
+    if (globalRowM + 16 <= M && globalColN + 16 <= N) {
+        wmma::store_matrix_sync(C + globalColN + globalRowM * N, c_frag, N, wmma::mem_col_major);
     }
 }
 
 /**
- * @brief Optimized GEMM kernel for float precision using tiled matrix multiplication
- * 
+ * @brief Optimized GEMM kernel for float precision aligned with cuBLAS NT
+ *
+ * Computes: C[n,m] = sum_k B[k,n] * A[m,k]
+ * Stored at: C[n + m*N]
+ *
  * This kernel uses shared memory tiling and register blocking for optimal performance.
  * Each thread computes an 8x8 tile of the output matrix.
  */
@@ -103,79 +122,83 @@ __global__ void gemm_float_kernel(
     const int ty = threadIdx.y;
     const int bx = blockIdx.x;
     const int by = blockIdx.y;
-    
+
     // Thread block is 16x16 = 256 threads
     const int tid = ty * 16 + tx;
-    
+
     // Shared memory for tiling
     __shared__ float As[BLOCK_M][BLOCK_K + 4]; // +4 for bank conflict avoidance
-    __shared__ float Bs[BLOCK_K][BLOCK_N + 4];
-    
+    __shared__ float Bs[BLOCK_K][BLOCK_N + 4]; // B is K×N, transposed in smem
+
     // Register arrays for accumulation - each thread handles 8x8 output elements
     float c_reg[8][8] = {0};
-    
+
     // Calculate global output position for this thread
-    const int globalRow = by * BLOCK_M + ty * 8;
-    const int globalCol = bx * BLOCK_N + tx * 8;
-    
+    // Note: globalRow is m index, globalCol is n index
+    const int globalRowM = by * BLOCK_M + ty * 8;
+    const int globalColN = bx * BLOCK_N + tx * 8;
+
     // Main computation loop over K dimension
     for (int kTile = 0; kTile < K; kTile += BLOCK_K) {
         // Cooperatively load tile of A into shared memory
-        // Each thread loads multiple elements
+        // A[m,k] at A[m*K + k]
         for (int i = tid; i < BLOCK_M * BLOCK_K; i += 256) {
             int row = i / BLOCK_K;
             int col = i % BLOCK_K;
             int globalRowA = by * BLOCK_M + row;
             int globalColA = kTile + col;
-            
+
             if (globalRowA < M && globalColA < K) {
                 As[row][col] = A[globalRowA * K + globalColA];
             } else {
                 As[row][col] = 0.0f;
             }
         }
-        
+
         // Cooperatively load tile of B into shared memory
+        // B[k,n] at B[k*N + n]
         for (int i = tid; i < BLOCK_K * BLOCK_N; i += 256) {
-            int row = i / BLOCK_N;
-            int col = i % BLOCK_N;
-            int globalRowB = kTile + row;
-            int globalColB = bx * BLOCK_N + col;
-            
+            int row = i / BLOCK_N;  // k index
+            int col = i % BLOCK_N;  // n index
+            int globalRowB = kTile + row;         // k
+            int globalColB = bx * BLOCK_N + col;  // n
+
             if (globalRowB < K && globalColB < N) {
                 Bs[row][col] = B[globalRowB * N + globalColB];
             } else {
                 Bs[row][col] = 0.0f;
             }
         }
-        
+
         __syncthreads();
-        
+
         // Compute partial products for this thread's 8x8 tile
+        // C[n,m] = sum_k B[k,n] * A[m,k]
         #pragma unroll
         for (int k = 0; k < BLOCK_K; ++k) {
             #pragma unroll
-            for (int i = 0; i < 8; ++i) {
+            for (int i = 0; i < 8; ++i) {  // m index
                 #pragma unroll
-                for (int j = 0; j < 8; ++j) {
-                    c_reg[i][j] += As[ty * 8 + i][k] * Bs[k][tx * 8 + j];
+                for (int j = 0; j < 8; ++j) {  // n index
+                    c_reg[i][j] += Bs[k][tx * 8 + j] * As[ty * 8 + i][k];
                 }
             }
         }
-        
+
         __syncthreads();
     }
-    
+
     // Store results to global memory
+    // C[n,m] at C[n + m*N]
     #pragma unroll
     for (int i = 0; i < 8; ++i) {
         #pragma unroll
         for (int j = 0; j < 8; ++j) {
-            int row = globalRow + i;
-            int col = globalCol + j;
-            
-            if (row < M && col < N) {
-                C[row * N + col] = c_reg[i][j];
+            int m = globalRowM + i;
+            int n = globalColN + j;
+
+            if (m < M && n < N) {
+                C[n + m * N] = c_reg[i][j];
             }
         }
     }
@@ -241,6 +264,12 @@ void gemm(const float* A, const float* B, float* C, int M, int N, int K, cudaStr
 // Scaled GEMM Implementations
 // ============================================================================
 
+/**
+ * @brief Scaled GEMM kernel aligned with cuBLAS NT
+ *
+ * Computes: C[n,m] = alpha * sum_k B[k,n] * A[m,k] + beta * C[n,m]
+ * Stored at: C[n + m*N]
+ */
 template<typename T>
 __global__ void gemm_scaled_kernel(
     const T* __restrict__ A,
@@ -249,23 +278,24 @@ __global__ void gemm_scaled_kernel(
     int M, int N, int K,
     T alpha, T beta)
 {
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
-    
-    if (row < M && col < N) {
+    int m = blockIdx.y * blockDim.y + threadIdx.y;
+    int n = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (m < M && n < N) {
         T sum = T(0);
-        
-        // Compute dot product
+
+        // Compute: sum_k B[k,n] * A[m,k]
         for (int k = 0; k < K; ++k) {
-            sum += A[row * K + k] * B[k * N + col];
+            sum += B[k * N + n] * A[m * K + k];
         }
-        
-        // Apply scaling: C = alpha * A * B + beta * C
+
+        // Apply scaling: C = alpha * sum + beta * C
+        int idx = n + m * N;
         if constexpr (std::is_same_v<T, float>) {
-            C[row * N + col] = alpha * sum + beta * C[row * N + col];
+            C[idx] = alpha * sum + beta * C[idx];
         } else {
             // For half precision
-            C[row * N + col] = __hadd(__hmul(alpha, sum), __hmul(beta, C[row * N + col]));
+            C[idx] = __hadd(__hmul(alpha, sum), __hmul(beta, C[idx]));
         }
     }
 }

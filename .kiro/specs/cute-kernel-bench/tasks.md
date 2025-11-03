@@ -3,275 +3,426 @@
 ## Development Philosophy
 
 **CRITICAL REQUIREMENTS**:
-1. **No Workarounds**: Every implementation must be genuine and functional - no placeholder code, no fake functionality
-2. **Verification Required**: Each task MUST be verified by actually running `make <target>` commands - not just compilation
-3. **Iterative Development**: Complete one full operator per iteration (framework + operator + baseline + benchmark + profiling)
-4. **Maximum Performance**: Use Tensor Cores (mma.sync/MMA atoms), async copy, TMA, pipelining - target ≥90% of vendor library performance
+1. **Pure CuTe**: All implementations in `src/` must use CuTe abstractions - no raw CUDA types
+2. **Hardware Features**: Must utilize latest GPU features (Tensor Cores, TMA, async copy, clusters)
+3. **Verification Required**: Each task MUST be verified by running actual benchmarks and tests
+4. **Performance Target**: ≥90% of vendor library (cuBLAS, cuDNN) performance
+5. **No Placeholders**: Every implementation must be genuine and functional
 
-## Iteration 1: Framework + Element-wise Add Operator ✓ COMPLETE
+## Phase 1: Foundation & Basic Implementations ✅ COMPLETE
 
-- [x] 1. Set up project structure and build system foundation
-  - Create directory structure: include/cutekernellib/operators/, src/operators/, src/config/, baselines/cuda/, benchmarks/, third_party/, build/, bench_results/, profiling/
-  - Create root-level config.yaml with build, benchmark, profiling, and operator configuration sections
-  - Create README.md with project overview
-  - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 4.1_
+- [x] 1. Framework setup, element-wise add operator, benchmarking, profiling
+  - Status: All tasks complete, verified working
 
-- [x] 2. Implement Makefile with GPU detection and core targets
-- [x] 2.1 Create Makefile with GPU architecture detection
-  - Implement CUDA_ARCH detection using nvidia-smi shell command in Makefile
-  - Add OS detection (Linux/Windows) using Make's shell function
-  - Define NVCC_FLAGS with architecture-specific flags (-arch=$(CUDA_ARCH))
-  - Add error handling for GPU detection failures with descriptive messages
-  - **Verification**: Run `make` to test GPU detection, verify CUDA_ARCH variable is set correctly
-  - _Requirements: 2.1, 2.2, 3.1, 3.2, 3.3, 3.4, 10.3, 9.6_
+- [x] 2. GEMM Basic Implementation
+  - Status: Clean implementation, 12,327 GFLOPS (54% of cuBLAS for FP32)
+  - Baseline Performance Recorded: See `docs/PERFORMANCE_BASELINE.md`
 
-- [x] 2.2 Implement setup target for CuTe dependency installation
-  - Add setup target to clone CUTLASS repository to third_party/cute/
-  - Initialize git submodules recursively
-  - Add success/failure logging with troubleshooting hints
-  - **Verification**: Run `make setup` on clean environment, verify third_party/cute/ exists with CuTe headers
-  - _Requirements: 2.3, 2.4, 10.1, 10.4, 9.6, 9.7_
+---
 
-- [x] 2.3 Implement configuration parser with yaml-cpp
-  - Write include/cutekernellib/config/config_parser.h with ConfigParser singleton class
-  - Implement src/config/config_parser.cpp with yaml-cpp to parse config.yaml
-  - Add methods: getBuildMode(), getWarmupRuns(), getMeasurementRuns(), getBatchSizes(), getProfilingMetrics()
-  - Add error handling for missing config file and invalid YAML syntax
-  - **Verification**: Create test program that loads config.yaml and prints parsed values
-  - _Requirements: 4.2, 4.3, 4.4, 4.5, 9.6_
+## Phase 2: GEMM Performance Optimization (CRITICAL - Must Complete Before Other Operators)
 
-- [x] 2.4 Add build target to compile configuration parser
-  - Implement build target in Makefile to compile config_parser.cpp
-  - Link yaml-cpp library (build from source if needed)
-  - Generate libcutekernellib_config.a
-  - **Verification**: Run `make build`, verify library is created in build/ directory
-  - _Requirements: 2.5, 2.6, 4.5, 9.6_
+- [-] 3. GEMM Phase 2A: Tensor Core Integration (WGMMA)
+  - Goal: Achieve 70-80% of cuBLAS performance using Hopper WGMMA instructions
+  - [x] 3.1 Study CUTLASS WGMMA examples
+    - Read `cutlass/examples/cute/tutorial/wgmma_gemm.cu`
+    - Read `cutlass/examples/cute/tutorial/sgemm_sm90.cu`
+    - Understand SM90 WGMMA atom structure
+    - Document key concepts in `docs/WGMMA_NOTES.md`
+    - Verification: Create summary document with code snippets
+    - Time: 2-3 hours study
+  - [ ] 3.2 Implement WGMMA atom selection for FP16
+    - Define MMA atom: `SM90_64x256x16_F16F16F16_SS<GMMA::Major::K, GMMA::Major::K>`
+    - Create TiledMMA with appropriate layout: `TiledMMA<MMA_Atom, Layout<Shape<_2,_1,_1>>>`
+    - Add to `src/operators/gemm_wgmma.cu` (new file)
+    - Verification: Compile successfully, verify atom dimensions
+    - Expected: Compile-time layout validation
+  - [ ] 3.3 Implement shared memory layout for WGMMA
+    - Create swizzled layout for A matrix (avoid bank conflicts)
+    - Create swizzled layout for B matrix
+    - Use `Swizzle<3,3,3>` for 8-way swizzle
+    - Allocate shared memory: `__shared__ T smem_A[BLK_M * BLK_K]`
+    - Verification: Check bank conflict metrics in profiling
+    - Expected: <5% bank conflicts
+  - [ ] 3.4 Implement WGMMA compute loop
+    - Use `gemm(tiled_mma, sA, sB, acc)` for matrix multiply
+    - Partition fragments: `partition_fragment_C(tiled_mma, make_shape(BLK_M, BLK_N))`
+    - Handle accumulator initialization and epilogue
+    - Verification: Correctness test against cuBLAS
+    - Expected: Bit-exact results (within FP16 tolerance)
+  - [ ] 3.5 Optimize tile sizes for Hopper
+    - Test tile sizes: 128x128, 128x256, 256x128
+    - Measure occupancy and performance for each
+    - Select optimal based on profiling
+    - Verification: Run `make tune-gemm`, check occupancy
+    - Expected: >50% occupancy, >70% of cuBLAS
+  - [ ] 3.6 Benchmark WGMMA implementation
+    - Run full benchmark suite: 256³ to 4096³
+    - Compare against Phase 1 baseline
+    - Record performance in `docs/PERFORMANCE_PHASE2A.md`
+    - Verification: `make bench-gemm`
+    - Expected: 10-20x speedup for FP16, 70-80% of cuBLAS
 
-- [x] 3. Implement element-wise add operator (CuTe version)
-- [x] 3.1 Create element-wise add operator with vectorized memory access
-  - Write include/cutekernellib/operators/elementwise_add.h with public API
-  - Implement src/operators/elementwise_add.cu using CuTe for vectorized loads/stores
-  - Use vector types (float4, half2) for memory coalescing
-  - Add CUDA_CHECK macro for error handling
-  - Add explicit template instantiations for float and half
-  - **Verification**: Compile operator, run simple host program to verify correctness against CPU reference
-  - _Requirements: 1.1, 1.2, 1.3, 1.4, 10.2, 9.6, 9.7_
+- [ ] 4. GEMM Phase 2B: Async Copy (TMA)
+  - Goal: Achieve 80-90% of cuBLAS performance using Tensor Memory Accelerator
+  - [ ] 4.1 Study CUTLASS TMA examples
+    - Read `cutlass/examples/cute/tutorial/tma_load.cu`
+    - Read `cutlass/examples/cute/tutorial/tma_store.cu`
+    - Understand TMA descriptor creation
+    - Document in `docs/TMA_NOTES.md`
+    - Verification: Summary document with examples
+    - Time: 2-3 hours study
+  - [ ] 4.2 Create TMA descriptors for A and B matrices
+    - Use `make_tma_copy(SM90_TMA_LOAD{}, tensor, tile_shape)`
+    - Create descriptor for A: `tma_load_a`
+    - Create descriptor for B: `tma_load_b`
+    - Handle 2D memory layout
+    - Verification: Descriptor creation succeeds
+    - Expected: Valid TMA descriptors
+  - [ ] 4.3 Implement TMA async load in kernel
+    - Replace manual shared memory loads with TMA
+    - Use `copy(tma_load_a, gA_tile, sA)`
+    - Add `cp_async_wait<0>()` for synchronization
+    - Verification: Correctness test
+    - Expected: Same results as manual copy
+  - [ ] 4.4 Implement multi-stage pipeline (3 stages)
+    - Stage 0: Load next tile
+    - Stage 1: Compute current tile
+    - Stage 2: Store previous results
+    - Use `cuda::pipeline` for synchronization
+    - Verification: Profile pipeline efficiency
+    - Expected: >80% compute/memory overlap
+  - [ ] 4.5 Optimize TMA parameters
+    - Tune number of pipeline stages (2, 3, 4)
+    - Adjust tile sizes for TMA efficiency
+    - Optimize barrier placement
+    - Verification: Profile with `make tune-gemm`
+    - Expected: 80-90% of cuBLAS
+  - [ ] 4.6 Benchmark TMA implementation
+    - Full benchmark suite
+    - Compare against Phase 2A (WGMMA only)
+    - Record in `docs/PERFORMANCE_PHASE2B.md`
+    - Verification: `make bench-gemm`
+    - Expected: 1.5-2x improvement over Phase 2A
 
-- [x] 3.2 Update Makefile to compile element-wise add operator
-  - Add elementwise_add to OPERATORS list in Makefile
-  - Update build target to compile elementwise_add.cu and link into libcutekernellib.a
-  - **Verification**: Run `make build`, verify no compilation errors, library includes operator
-  - _Requirements: 2.5, 9.6_
+- [ ] 5. GEMM Phase 2C: Thread Block Clusters
+  - Goal: Achieve 90-95% of cuBLAS performance using clusters and distributed shared memory
+  - [ ] 5.1 Study CUTLASS cluster examples
+    - Read `cutlass/examples/cute/tutorial/cluster_gemm.cu`
+    - Understand cluster launch configuration
+    - Understand distributed shared memory
+    - Document in `docs/CLUSTERS_NOTES.md`
+    - Verification: Summary document
+    - Time: 2-3 hours study
+  - [ ] 5.2 Implement cluster launch configuration
+    - Define cluster dimensions: `dim3 cluster_dims(2, 2, 1)`
+    - Use `cudaLaunchKernelEx` for cluster launch
+    - Configure cluster attributes
+    - Verification: Kernel launches successfully
+    - Expected: Cluster formation confirmed
+  - [ ] 5.3 Implement distributed shared memory access
+    - Allocate distributed shared memory
+    - Access neighbor CTA's shared memory
+    - Use `get_cluster_smem_ptr(neighbor_id)`
+    - Verification: Correctness test
+    - Expected: Correct data sharing across CTAs
+  - [ ] 5.4 Optimize for larger effective shared memory
+    - Use up to 228KB per cluster (vs 164KB per CTA)
+    - Adjust tile sizes to utilize larger memory
+    - Reduce global memory traffic
+    - Verification: Profile memory bandwidth
+    - Expected: >90% DRAM bandwidth utilization
+  - [ ] 5.5 Benchmark cluster implementation
+    - Full benchmark suite
+    - Compare against Phase 2B (TMA)
+    - Record in `docs/PERFORMANCE_PHASE2C.md`
+    - Verification: `make bench-gemm`
+    - Expected: 90-95% of cuBLAS
 
-- [x] 4. Implement element-wise add baseline (optimized CUDA)
-- [x] 4.1 Create hand-optimized CUDA baseline for element-wise add
-  - Implement baselines/cuda/cuda_elementwise_add.cu with vectorized memory access
-  - Use same API signature as CuTe version for fair comparison
-  - Optimize with: vector loads/stores, grid-stride loops, proper block sizing
-  - **Verification**: Compile and run standalone test, verify correctness and performance
-  - _Requirements: 5.1, 5.2, 5.3, 5.4, 9.6, 9.7_
+- [ ] 6. GEMM Phase 2D: Final Optimization & FP8 Support
+  - Goal: Reach 95%+ of cuBLAS, add FP8 support for 2x additional throughput
 
-- [x] 4.2 Update Makefile to compile CUDA baseline
-  - Add target to compile cuda_elementwise_add.cu
-  - **Verification**: Run `make build`, verify baseline compiles successfully
-  - _Requirements: 5.1, 9.6_
+- [ ] 2.4.1 Implement FP8 Tensor Core support
+  - Add FP8 MMA atom: `SM90_64x256x64_E4M3E4M3F16_SS<>`
+  - Implement FP8 input conversion
+  - Handle FP16 accumulation
+  - **Verification**: Correctness test with FP8 inputs
+  - [ ] 6.1 Implement FP8 Tensor Core support
+    - Add FP8 MMA atom: `SM90_64x256x64_E4M3E4M3F16_SS<>`
+    - Implement FP8 input conversion
+    - Handle FP16 accumulation
+    - Verification: Correctness test with FP8 inputs
+    - Expected: 2x throughput vs FP16
+  - [ ] 6.2 Fine-tune all parameters
+    - Optimize tile sizes per matrix size
+    - Tune pipeline stages
+    - Optimize register usage
+    - Minimize synchronization overhead
+    - Verification: Profile each optimization
+    - Expected: Incremental improvements
+  - [ ] 6.3 Implement epilogue fusion
+    - Add support for alpha/beta scaling: `C = alpha*A*B + beta*C`
+    - Fuse activation functions (ReLU, GELU)
+    - Fuse bias addition
+    - Verification: Correctness tests
+    - Expected: No performance loss
+  - [ ] 6.4 Final benchmark and documentation
+    - Complete benchmark suite (FP32, FP16, FP8)
+    - Create performance comparison table
+    - Document all optimizations in `docs/GEMM_FINAL_REPORT.md`
+    - Verification: `make bench-gemm`
+    - Expected: 95%+ of cuBLAS for all precisions
 
-- [x] 5. Implement benchmarking framework
-- [x] 5.1 Create benchmark runner infrastructure with CUDA events
-  - Write benchmarks/benchmark_runner.h with BenchmarkRunner class
-  - Implement measureLatency() using cudaEvent timing with warmup and measurement phases
-  - Implement calculateThroughput() for bandwidth calculation (GB/s)
-  - Define BenchmarkResult struct for storing results
-  - **Verification**: Create simple test that times a dummy kernel, verify timing is reasonable
-  - _Requirements: 6.2, 6.3, 6.4, 6.5, 9.6_
+---
 
-- [x] 5.2 Create element-wise add benchmark driver
-  - Implement benchmarks/bench_elementwise_add.cu using BenchmarkRunner
-  - Benchmark both CuTe and CUDA baseline across batch sizes from config.yaml
-  - Compute speedup ratio and bandwidth utilization
-  - Output results to CSV: bench_results/elementwise_add_results.csv
-  - **Verification**: Run benchmark manually, verify CSV is generated with valid data
-  - _Requirements: 6.1, 6.6, 6.7, 7.4, 7.5, 9.6, 9.7_
+## Phase 3: Convolution Operator (After GEMM Complete)
 
-- [x] 5.3 Add bench-elementwise_add Makefile target
-  - Create bench-elementwise_add target to compile and run benchmark
-  - Parse config.yaml for benchmark parameters
-  - **Verification**: Run `make bench-elementwise_add`, verify benchmark executes and generates results
-  - _Requirements: 6.1, 9.6, 9.7_
+- [ ] 7. Conv2D Phase 3A: Basic CuTe Implementation
+  - Goal: Correct implementation using CuTe, 50-60% of cuDNN
+  - [ ] 7.1 Study CUTLASS convolution examples
+    - Read `cutlass/examples/13_two_tensor_op_fusion/`
+    - Read `cutlass/examples/cute/tutorial/` for conv patterns
+    - Understand im2col vs direct convolution
+    - Document in `docs/CONV_NOTES.md`
+    - Verification: Summary document
+    - Time: 3-4 hours study
+  - [ ] 7.2 Implement Conv2D operator interface
+    - Create `include/cutekernellib/operators/conv2d.h`
+    - Define API: `conv2d(input, weight, output, N, C, H, W, K, R, S, stride, padding)`
+    - Support NCHW and NHWC layouts
+    - Verification: API compiles
+    - Expected: Clean interface
+  - [ ] 7.3 Implement im2col transformation using CuTe
+    - Use CuTe Layout to describe im2col pattern
+    - Create tensor view for input patches
+    - Avoid explicit im2col materialization
+    - Verification: Correctness test on small input
+    - Expected: Correct patch extraction
+  - [ ] 7.4 Implement Conv2D as batched GEMM
+    - Reuse GEMM kernel from Phase 2
+    - Map convolution to GEMM dimensions
+    - Handle padding and stride in layout
+    - Verification: Correctness test against cuDNN
+    - Expected: Bit-exact results
+  - [ ] 7.5 Optimize for common conv sizes
+    - Tune for 3x3, 5x5, 7x7 kernels
+    - Optimize for stride=1, stride=2
+    - Handle padding efficiently
+    - Verification: Benchmark common sizes
+    - Expected: 50-60% of cuDNN
 
-- [x] 6. Implement profiling system with Nsight Compute
-- [x] 6.1 Add tune-elementwise_add Makefile target
-  - Create tune-elementwise_add target to run ncu profiler on operator
-  - Generate ncu-rep file in profiling/ directory
-  - Extract summary metrics to text file
-  - Parse config.yaml for ncu metric sets
-  - **Verification**: Run `make tune-elementwise_add`, verify .ncu-rep and summary.txt are generated
-  - _Requirements: 7A.1, 7A.2, 7A.3, 7A.4, 7A.5, 9.6, 9.7_
+- [ ] 8. Conv2D Phase 3B: Winograd Algorithm
+  - Goal: 70-80% of cuDNN for 3x3 convolutions
+  - [ ] 8.1 Study Winograd convolution
+    - Read Winograd F(2x2, 3x3) algorithm
+    - Understand transform matrices
+    - Study CUTLASS Winograd implementation
+    - Document in `docs/WINOGRAD_NOTES.md`
+    - Verification: Summary with math
+    - Time: 3-4 hours study
+  - [ ] 8.2 Implement Winograd transforms
+    - Implement input transform: `B^T * d * B`
+    - Implement filter transform: `G * g * G^T`
+    - Implement output transform: `A^T * m * A`
+    - Use CuTe for transform operations
+    - Verification: Transform correctness
+    - Expected: Correct transforms
+  - [ ] 8.3 Implement Winograd Conv2D kernel
+    - Apply transforms in shared memory
+    - Use WGMMA for element-wise products
+    - Fuse transforms with GEMM
+    - Verification: Correctness test
+    - Expected: Same results as direct conv
+  - [ ] 8.4 Optimize Winograd implementation
+    - Minimize transform overhead
+    - Optimize shared memory usage
+    - Use Tensor Cores for transforms
+    - Verification: Profile and benchmark
+    - Expected: 70-80% of cuDNN for 3x3
 
-- [x] 6.2 Add tune-all Makefile target
-  - Create tune-all target to profile all operators sequentially
-  - **Verification**: Run `make tune-all`, verify profiling files for all operators
-  - _Requirements: 7A.1, 9.6_
+- [ ] 9. Conv2D Phase 3C: Direct Convolution Optimization
+  - Goal: 80-90% of cuDNN using optimized direct convolution
+  - [ ] 9.1 Implement optimized direct convolution
+    - Use TMA for input loading
+    - Use WGMMA for accumulation
+    - Implement multi-stage pipeline
+    - Verification: Correctness test
+    - Expected: Correct results
+  - [ ] 9.2 Implement specialized kernels
+    - 1x1 convolution (pointwise)
+    - 3x3 stride-1 (most common)
+    - Depthwise convolution
+    - Verification: Benchmark each type
+    - Expected: Near-optimal for each
+  - [ ] 9.3 Add thread block clusters
+    - Use clusters for larger tile sizes
+    - Share input data across CTAs
+    - Reduce redundant loads
+    - Verification: Profile memory traffic
+    - Expected: 80-90% of cuDNN
+  - [ ] 9.4 Final Conv2D optimization
+    - Auto-tuning for different shapes
+    - Kernel selection heuristics
+    - Complete documentation
+    - Verification: Full benchmark suite
+    - Expected: 90%+ of cuDNN
 
-- [x] 7. Create report generation for element-wise add
-- [x] 7.1 Implement Python script for benchmark report generation
-  - Write scripts/generate_report.py to parse CSV files
-  - Generate Markdown table with operator, variant, batch size, latency, throughput, speedup
-  - Output to bench_results/summary.md
-  - **Verification**: Run script manually, verify summary.md is well-formatted
-  - _Requirements: 7.2, 7.3, 9.6_
+---
 
-- [x] 7.2 Add bench-all Makefile target for iteration 1
-  - Create bench-all target to run all benchmarks and generate summary
-  - **Verification**: Run `make bench-all`, verify summary.md is generated with complete data
-  - _Requirements: 7.1, 7.2, 7.3, 7.4, 7.5, 9.6, 9.7_
+## Phase 4: Reduction Operators
 
-- [x] 8. Documentation for iteration 1
-- [x] 8.1 Write README.md with quickstart guide
-  - Add project overview, technology stack, and architecture summary
-  - Include quickstart: `make setup`, `make build`, `make bench-elementwise_add`
-  - Add troubleshooting section for GPU detection and dependency issues
-  - **Verification**: Follow README on clean environment, verify all steps work
-  - _Requirements: 9.1, 9.2, 9.3, 9.4, 10.3, 10.4, 9.6, 9.7_
+- [ ] 10. Reduction Phase 4A: Basic Warp-level Reduction
+  - Goal: Correct implementation, 60-70% of CUB
+  - [ ] 10.1 Study CuTe reduction patterns
+    - Read warp-level reduction examples
+    - Understand shuffle operations
+    - Study CUB reduction implementation
+    - Document in `docs/REDUCTION_NOTES.md`
+    - Verification: Summary document
+    - Time: 2-3 hours study
+  - [ ] 10.2 Implement warp-level sum reduction
+    - Use `__shfl_down_sync` for warp reduction
+    - Implement tree reduction pattern
+    - Handle partial warps
+    - Verification: Correctness test
+    - Expected: Correct sum
+  - [ ] 10.3 Implement block-level reduction
+    - Use shared memory for inter-warp reduction
+    - Minimize synchronization
+    - Use atomic operations for final reduction
+    - Verification: Correctness test
+    - Expected: Correct results
+  - [ ] 10.4 Implement multiple reduction types
+    - Sum, Max, Min, Product
+    - Mean, Variance
+    - Generic reduction with custom operator
+    - Verification: Test each type
+    - Expected: 60-70% of CUB
 
-- [x] 8.2 Create developer guide for adding operators
-  - Document step-by-step process for adding new operators
-  - Include code templates for operator, baseline, and benchmark
-  - Explain Makefile integration and config.yaml extension
-  - **Verification**: Review guide for completeness and clarity
-  - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5, 9.6, 9.7_
+- [ ] 11. Reduction Phase 4B: Multi-stage Reduction
+  - Goal: 80-90% of CUB using optimized multi-stage approach
+  - [ ] 11.1 Implement two-stage reduction
+    - Stage 1: Block-level partial reductions
+    - Stage 2: Final reduction of partials
+    - Optimize grid size selection
+    - Verification: Benchmark
+    - Expected: Better for large inputs
+  - [ ] 11.2 Implement vectorized loads
+    - Use vector types for input loading
+    - Reduce in registers before shared memory
+    - Minimize memory transactions
+    - Verification: Profile memory bandwidth
+    - Expected: >80% bandwidth utilization
+  - [ ] 11.3 Add specialized kernels
+    - Small input (single block)
+    - Medium input (multi-block)
+    - Large input (two-stage)
+    - Verification: Benchmark each
+    - Expected: 80-90% of CUB
 
-## Iteration 2: GEMM with Tensor Cores ✓ COMPLETE
+---
 
-- [x] 9. Implement GEMM operator with Tensor Cores (CuTe version)
-- [x] 9.1 Create GEMM operator using CuTe MMA atoms
-  - Write include/cutekernellib/operators/gemm.h with public API
-  - Implement src/operators/gemm.cu using CuTe MMA atoms (SM80_16x8x16_F32F16F16F32_TN for Ampere)
-  - Use TiledMMA for thread block organization
-  - Implement software pipelining with async copy (cp.async) for data loading
-  - Use shared memory tiling for A and B matrices
-  - Target ≥90% of cuBLAS performance
-  - **Verification**: Run against cuBLAS, verify correctness and performance within 10% of cuBLAS
-  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 10.2, 9.6, 9.7_
+## Phase 5: Additional Operators
 
-- [x] 9.2 Update Makefile to compile GEMM operator
-  - Add gemm to OPERATORS list
-  - Update build target to compile gemm.cu
-  - **Verification**: Run `make build`, verify GEMM compiles without errors
-  - _Requirements: 2.5, 9.6_
+- [ ] 12. Softmax (After Reduction Complete)
+  - [ ] 12.1 Implement online softmax algorithm
+    - Use numerically stable algorithm
+    - Fuse max, exp, and sum operations
+    - Use warp-level primitives
+    - Verification: Correctness test
+    - Expected: Numerically stable
+  - [ ] 12.2 Optimize for different dimensions
+    - Row-wise softmax (most common)
+    - Column-wise softmax
+    - Batched softmax
+    - Verification: Benchmark
+    - Expected: 80-90% of vendor library
 
-- [x] 10. Implement GEMM baseline with Tensor Cores (optimized CUDA)
-- [x] 10.1 Create hand-optimized CUDA GEMM baseline
-  - Implement baselines/cuda/cuda_gemm.cu using wmma or mma.sync instructions
-  - Use shared memory tiling (e.g., 128x128 tiles)
-  - Implement double buffering for overlapping compute and memory
-  - Use warp-level matrix operations for Tensor Core utilization
-  - **Verification**: Run against cuBLAS, verify performance is competitive
-  - _Requirements: 5.1, 5.2, 5.3, 5.4, 9.6, 9.7_
+- [ ] 13. LayerNorm (After Reduction Complete)
+  - [ ] 13.1 Implement fused LayerNorm
+    - Fuse mean, variance, and normalization
+    - Use Welford's online algorithm
+    - Minimize memory passes
+    - Verification: Correctness test
+    - Expected: Correct results
+  - [ ] 13.2 Add affine transformation
+    - Fuse scale and bias
+    - Support different layouts
+    - Verification: Benchmark
+    - Expected: 85-95% of vendor library
 
-- [x] 10.2 Update Makefile to compile GEMM baseline
-  - Add target to compile cuda_gemm.cu
-  - **Verification**: Run `make build`, verify baseline compiles
-  - _Requirements: 5.1, 9.6_
+- [ ] 14. Batched GEMM (After GEMM Phase 2 Complete)
+  - [ ] 14.1 Implement strided batched GEMM
+    - Extend GEMM kernel for batches
+    - Use persistent threads
+    - Optimize for small batch sizes
+    - Verification: Correctness test
+    - Expected: Same per-GEMM performance
 
-- [x] 11. Create GEMM benchmark and profiling
-- [x] 11.1 Implement GEMM benchmark driver
-  - Write benchmarks/bench_gemm.cu using BenchmarkRunner
-  - Test multiple matrix sizes from config.yaml
-  - Compute GFLOPS (2*M*N*K operations)
-  - Compare against cuBLAS as additional reference
-  - Output to bench_results/gemm_results.csv
-  - **Verification**: Run `make bench-gemm`, verify results show high GFLOPS and competitive speedup
-  - _Requirements: 6.1, 6.6, 6.7, 7.4, 7.5, 9.6, 9.7_
+- [ ] 15. Grouped GEMM (After Batched GEMM Complete)
+  - [ ] 15.1 Implement grouped GEMM
+    - Handle variable matrix sizes
+    - Use dynamic parallelism or persistent threads
+    - Optimize load balancing
+    - Verification: Benchmark
+    - Expected: 80-90% of cuBLAS
 
-- [x] 11.2 Add bench-gemm and tune-gemm Makefile targets
-  - Create bench-gemm target
-  - Create tune-gemm target for ncu profiling
-  - **Verification**: Run both targets, verify benchmark and profiling outputs
-  - _Requirements: 6.1, 7A.1, 7A.2, 7A.3, 9.6, 9.7_
+---
 
-- [x] 11.3 Update bench-all and tune-all for GEMM
-  - Add GEMM to bench-all and tune-all targets
-  - **Verification**: Run `make bench-all` and `make tune-all`, verify GEMM is included
-  - _Requirements: 7.1, 7A.1, 9.6_
+## Phase 6: Final Integration & Documentation
 
-- [x] 12. Analyze GEMM performance and optimize
-- [x] 12.1 Profile GEMM with Nsight Compute
-  - Run `make tune-gemm` to generate profiling data
-  - Analyze Tensor Core utilization, memory bandwidth, occupancy
-  - Identify bottlenecks (compute-bound vs memory-bound)
-  - **Verification**: Review ncu report, verify Tensor Cores are utilized (check sm__inst_executed_pipe_tensor metrics)
-  - _Requirements: 7A.1, 7A.2, 7A.3, 7A.4, 9.6, 9.7_
+- [ ] 16. Performance Validation
+  - [ ] 16.1 Complete benchmark suite
+    - Run all operators on all supported sizes
+    - Generate performance comparison tables
+    - Create performance visualization
+    - Verification: All benchmarks pass
+    - Expected: All operators ≥90% of vendor libraries
+  - [ ] 16.2 Regression testing
+    - Create automated test suite
+    - Test all operators for correctness
+    - Test all precisions (FP32, FP16, FP8)
+    - Verification: All tests pass
+    - Expected: 100% correctness
 
-- [x] 12.2 Optimize GEMM based on profiling insights
-  - Adjust tile sizes, thread block dimensions based on profiling
-  - Tune pipeline stages for better compute/memory overlap
-  - Optimize shared memory bank conflicts if present
-  - **Verification**: Re-run benchmark and profiling, verify performance improvement
-  - _Requirements: 1.5, 1.6, 1.7, 9.6, 9.7_
+- [ ] 17. Documentation
+  - [ ] 17.1 Complete API documentation
+    - Document all public APIs
+    - Add usage examples
+    - Create Doxygen documentation
+    - Verification: `make docs` succeeds
+    - Expected: Complete API docs
+  - [ ] 17.2 Performance guide
+    - Document performance characteristics
+    - Add tuning guidelines
+    - Create troubleshooting guide
+    - Verification: Review for completeness
+    - Expected: Comprehensive guide
+  - [ ] 17.3 Developer guide
+    - Document how to add new operators
+    - Explain CuTe patterns used
+    - Add optimization techniques
+    - Verification: Follow guide to add operator
+    - Expected: Clear, actionable guide
 
-- [x] 13. Update documentation for GEMM
-- [x] 13.1 Update README with GEMM examples
-  - Add GEMM usage examples and performance expectations
-  - **Verification**: Review README for accuracy
-  - _Requirements: 9.1, 9.2, 9.6_
+---
 
-- [x] 13.2 Document Tensor Core usage patterns
-  - Add section in developer guide explaining MMA atom usage
-  - Include code examples for Tensor Core kernels
-  - **Verification**: Review documentation for completeness
-  - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5, 9.6_
+## Success Criteria
 
-## Iteration 3: Additional Operator (Convolution or Reduction)
+### Performance Targets
+- **GEMM**: ≥95% of cuBLAS (all precisions)
+- **Conv2D**: ≥90% of cuDNN (common sizes)
+- **Reduction**: ≥85% of CUB
+- **Element-wise**: ≥95% of memory bandwidth
+- **Other operators**: ≥85% of vendor libraries
 
-This iteration is optional and can be pursued if additional operators are needed. The framework is complete and ready for extension.
+### Code Quality
+- ✅ Pure CuTe implementations (no raw CUDA in `src/`)
+- ✅ All hardware features utilized (Tensor Cores, TMA, clusters)
+- ✅ Comprehensive testing (correctness + performance)
+- ✅ Complete documentation
 
-- [ ] 14. Implement third operator (choose one: Conv2D or Reduction)
-- [ ] 14.1 Create operator with CuTe (using appropriate hardware features)
-  - Write header and implementation in include/ and src/operators/
-  - Use Tensor Cores if applicable (e.g., for Conv2D)
-  - Use warp-level primitives for reductions
-  - **Verification**: Run correctness tests against reference implementation
-  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 10.2, 9.6, 9.7_
-
-- [ ] 14.2 Create optimized CUDA baseline
-  - Implement in baselines/cuda/
-  - Use appropriate optimization techniques for operator type
-  - **Verification**: Verify correctness and performance
-  - _Requirements: 5.1, 5.2, 5.3, 5.4, 9.6, 9.7_
-
-- [ ] 14.3 Create benchmark and profiling integration
-  - Implement benchmark driver in benchmarks/
-  - Add bench-<op> and tune-<op> Makefile targets
-  - Update bench-all and tune-all
-  - **Verification**: Run `make bench-<op>` and `make tune-<op>`, verify outputs
-  - _Requirements: 6.1, 6.6, 6.7, 7.1, 7A.1, 7A.2, 7A.3, 9.6, 9.7_
-
-- [ ] 14.4 Optimize based on profiling
-  - Profile with ncu, analyze bottlenecks
-  - Optimize implementation
-  - **Verification**: Verify performance improvement after optimization
-  - _Requirements: 1.5, 1.6, 1.7, 7A.1, 7A.2, 7A.3, 7A.4, 9.6, 9.7_
-
-## Project Completion and Polish
-
-- [ ] 15. Final integration and validation
-- [ ] 15.1 Run complete pipeline on clean environment
-  - Execute: `make clean`, `make setup`, `make build`, `make bench-all`, `make tune-all`
-  - Verify all operators compile, benchmark, and profile successfully
-  - Review bench_results/summary.md for completeness and performance targets
-  - **Verification**: Complete pipeline runs without errors, all operators meet performance targets
-  - _Requirements: All requirements, 9.6, 9.7_
-
-- [ ] 15.2 Final documentation review
-  - Verify README quickstart works for new users
-  - Ensure developer guide covers all implemented operators
-  - Check all profiling and benchmarking documentation
-  - **Verification**: Have another developer follow documentation to add a new operator
-  - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5, 9.6, 9.7_
-
-- [ ]* 15.3 Create Doxygen API documentation
-  - Set up Doxyfile configuration
-  - Add make docs target
-  - Generate HTML documentation
-  - _Requirements: 2.7_
+### Verification
+- All tasks must be verified by running actual code
+- Performance must be measured, not estimated
+- Correctness must be validated against reference implementations

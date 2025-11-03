@@ -1,176 +1,159 @@
 /**
  * @file gemm.cu
- * @brief CuTe-style GEMM implementation (Phase 1: Correctness First)
+ * @brief CuTe GEMM implementation using WGMMA (Hopper SM90+)
  * 
- * This is a clean, correct implementation that will serve as the baseline
- * for adding CuTe features and Hopper optimizations.
+ * This file provides the public GEMM interface and dispatches to the
+ * WGMMA implementation for all data types on SM90+ GPUs.
+ * 
+ * All actual computation is done using CuTe's WGMMA atoms.
  */
 
 #include "cutekernellib/operators/gemm.h"
+#include <string>
+#include <cstring>
+#include <algorithm>
+#include <cctype>
 
 namespace cutekernellib {
 
+// Forward declare WGMMA implementation
+void gemm_wgmma_fp16_dispatch(const void* A, const void* B, void* C,
+                              int M, int N, int K, 
+                              char lhs_format, char rhs_format,
+                              cudaStream_t stream);
+
 /**
- * @brief Simple tiled GEMM kernel - correctness focused
- * 
- * Phase 1: Get it working correctly
- * Phase 2: Add proper CuTe Layout/Tensor abstractions
- * Phase 3: Add WGMMA Tensor Cores
- * Phase 4: Add TMA async copy
+ * @brief Conversion kernels for FP32 <-> FP16
  */
-template<typename T>
-__global__ void gemm_kernel_tiled(
-    const T* A, const T* B, T* C,
-    int M, int N, int K)
-{
-    // Tile configuration
-    constexpr int TILE_M = 64;
-    constexpr int TILE_N = 64;
-    constexpr int TILE_K = 16;
-    constexpr int BLOCK_SIZE = 16;  // 16x16 = 256 threads
-    
-    // Shared memory
-    __shared__ T smem_A[TILE_M][TILE_K];
-    __shared__ T smem_B[TILE_K][TILE_N];
-    
-    // Thread indices
-    int tx = threadIdx.x;
-    int ty = threadIdx.y;
-    int bx = blockIdx.x;
-    int by = blockIdx.y;
-    
-    // Each thread computes 4x4 output elements
-    constexpr int THR_TILE = 4;
-    int row_base = by * TILE_M + ty * THR_TILE;
-    int col_base = bx * TILE_N + tx * THR_TILE;
-    
-    // Accumulator
-    T acc[THR_TILE][THR_TILE];
-    #pragma unroll
-    for (int i = 0; i < THR_TILE; ++i) {
-        #pragma unroll
-        for (int j = 0; j < THR_TILE; ++j) {
-            acc[i][j] = T(0);
-        }
-    }
-    
-    // Loop over K dimension
-    for (int t = 0; t < (K + TILE_K - 1) / TILE_K; ++t) {
-        int k_base = t * TILE_K;
-        
-        // Load A tile cooperatively
-        #pragma unroll
-        for (int i = 0; i < THR_TILE; ++i) {
-            int row = ty * THR_TILE + i;
-            int col = tx;
-            int global_row = by * TILE_M + row;
-            int global_col = k_base + col;
-            
-            if (global_row < M && global_col < K) {
-                smem_A[row][col] = A[global_row * K + global_col];
-            } else {
-                smem_A[row][col] = T(0);
-            }
-        }
-        
-        // Load B tile cooperatively
-        #pragma unroll
-        for (int j = 0; j < THR_TILE; ++j) {
-            int row = ty;
-            int col = tx * THR_TILE + j;
-            int global_row = k_base + row;
-            int global_col = bx * TILE_N + col;
-            
-            if (global_row < K && global_col < N) {
-                smem_B[row][col] = B[global_row * N + global_col];
-            } else {
-                smem_B[row][col] = T(0);
-            }
-        }
-        
-        __syncthreads();
-        
-        // Compute
-        #pragma unroll
-        for (int k = 0; k < TILE_K; ++k) {
-            #pragma unroll
-            for (int i = 0; i < THR_TILE; ++i) {
-                #pragma unroll
-                for (int j = 0; j < THR_TILE; ++j) {
-                    acc[i][j] += smem_A[ty * THR_TILE + i][k] * smem_B[k][tx * THR_TILE + j];
-                }
-            }
-        }
-        
-        __syncthreads();
-    }
-    
-    // Write results
-    #pragma unroll
-    for (int i = 0; i < THR_TILE; ++i) {
-        #pragma unroll
-        for (int j = 0; j < THR_TILE; ++j) {
-            int row = row_base + i;
-            int col = col_base + j;
-            if (row < M && col < N) {
-                C[row * N + col] = acc[i][j];
-            }
-        }
+__global__ void convert_fp32_to_fp16(const float* in, __half* out, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        out[idx] = __float2half(in[idx]);
     }
 }
 
-template<typename T>
-void gemm_impl(const T* A, const T* B, T* C, int M, int N, int K, cudaStream_t stream) {
-    if (A == nullptr || B == nullptr || C == nullptr) {
-        fprintf(stderr, "ERROR: Null pointer passed to gemm\n");
-        return;
+__global__ void convert_fp16_to_fp32(const __half* in, float* out, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        out[idx] = __half2float(in[idx]);
     }
-    if (M <= 0 || N <= 0 || K <= 0) {
-        fprintf(stderr, "ERROR: Invalid dimensions: M=%d, N=%d, K=%d\n", M, N, K);
-        return;
-    }
-    
-    constexpr int TILE_M = 64;
-    constexpr int TILE_N = 64;
-    constexpr int BLOCK_SIZE = 16;
-    
-    dim3 blockDim(BLOCK_SIZE, BLOCK_SIZE);
-    dim3 gridDim((N + TILE_N - 1) / TILE_N, (M + TILE_M - 1) / TILE_M);
-    
-    gemm_kernel_tiled<T><<<gridDim, blockDim, 0, stream>>>(A, B, C, M, N, K);
-    
-    CUDA_CHECK_KERNEL();
 }
 
-// Explicit instantiations
+/**
+ * @brief FP32 GEMM - converts to FP16 and uses WGMMA
+ */
 template<>
-void gemm<float>(const float* A, const float* B, float* C, int M, int N, int K, cudaStream_t stream) {
-    gemm_impl(A, B, C, M, N, K, stream);
+void gemm<float>(const float* A, const float* B, float* C, 
+                 int M, int N, int K, const char* opmode, cudaStream_t stream) {
+    // Check device capability
+    int device;
+    cudaDeviceProp prop;
+    CUDA_CHECK(cudaGetDevice(&device));
+    CUDA_CHECK(cudaGetDeviceProperties(&prop, device));
+    
+    if (prop.major < 9) {
+        fprintf(stderr, "ERROR: This implementation requires SM90+ (Hopper) GPU\n");
+        fprintf(stderr, "       Detected: SM%d.%d\n", prop.major, prop.minor);
+        exit(EXIT_FAILURE);
+    }
+    
+    // Allocate FP16 buffers
+    size_t size_A = M * K * sizeof(__half);
+    size_t size_B = K * N * sizeof(__half);
+    size_t size_C = M * N * sizeof(__half);
+    
+    __half *d_A_fp16, *d_B_fp16, *d_C_fp16;
+    CUDA_CHECK(cudaMalloc(&d_A_fp16, size_A));
+    CUDA_CHECK(cudaMalloc(&d_B_fp16, size_B));
+    CUDA_CHECK(cudaMalloc(&d_C_fp16, size_C));
+    
+    // Convert FP32 to FP16
+    int threads = 256;
+    int total_A = M * K;
+    int total_B = K * N;
+    int total_C = M * N;
+    
+    convert_fp32_to_fp16<<<(total_A + threads - 1) / threads, threads, 0, stream>>>(A, d_A_fp16, total_A);
+    convert_fp32_to_fp16<<<(total_B + threads - 1) / threads, threads, 0, stream>>>(B, d_B_fp16, total_B);
+    
+    // Parse opmode: <LHS_format><RHS_format> where format is R (row-major) or C (column-major)
+    std::string opmode_str(opmode);
+    std::transform(opmode_str.begin(), opmode_str.end(), opmode_str.begin(), 
+                   [](unsigned char c){ return std::toupper(c); });
+    
+    char lhs_format = (opmode_str.length() >= 1) ? opmode_str[0] : 'R';
+    char rhs_format = (opmode_str.length() >= 2) ? opmode_str[1] : 'R';
+    
+    // Run WGMMA with dispatch
+    gemm_wgmma_fp16_dispatch(d_A_fp16, d_B_fp16, d_C_fp16, M, N, K, lhs_format, rhs_format, stream);
+    
+    // Convert back to FP32
+    convert_fp16_to_fp32<<<(total_C + threads - 1) / threads, threads, 0, stream>>>(d_C_fp16, C, total_C);
+    
+    // Cleanup
+    CUDA_CHECK(cudaFree(d_A_fp16));
+    CUDA_CHECK(cudaFree(d_B_fp16));
+    CUDA_CHECK(cudaFree(d_C_fp16));
+}
+
+/**
+ * @brief FP16 GEMM - direct WGMMA
+ */
+template<>
+void gemm<__half>(const __half* A, const __half* B, __half* C, 
+                  int M, int N, int K, const char* opmode, cudaStream_t stream) {
+    // Check device capability
+    int device;
+    cudaDeviceProp prop;
+    CUDA_CHECK(cudaGetDevice(&device));
+    CUDA_CHECK(cudaGetDeviceProperties(&prop, device));
+    
+    if (prop.major < 9) {
+        fprintf(stderr, "ERROR: This implementation requires SM90+ (Hopper) GPU\n");
+        fprintf(stderr, "       Detected: SM%d.%d\n", prop.major, prop.minor);
+        exit(EXIT_FAILURE);
+    }
+    
+    // Parse opmode: <LHS_format><RHS_format> where format is R (row-major) or C (column-major)
+    std::string opmode_str(opmode);
+    std::transform(opmode_str.begin(), opmode_str.end(), opmode_str.begin(), 
+                   [](unsigned char c){ return std::toupper(c); });
+    
+    char lhs_format = (opmode_str.length() >= 1) ? opmode_str[0] : 'R';
+    char rhs_format = (opmode_str.length() >= 2) ? opmode_str[1] : 'R';
+    
+    // Direct WGMMA call with dispatch
+    gemm_wgmma_fp16_dispatch(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+}
+
+/**
+ * @brief Scaled GEMM - not yet implemented
+ */
+template<>
+void gemm_scaled<float>(const float* A, const float* B, float* C, 
+                        int M, int N, int K, float alpha, float beta, 
+                        const char* opmode, cudaStream_t stream) {
+    if (alpha != 1.0f || beta != 0.0f) {
+        fprintf(stderr, "ERROR: Scaled GEMM not yet implemented\n");
+        fprintf(stderr, "       Only alpha=1.0, beta=0.0 supported\n");
+        exit(EXIT_FAILURE);
+    }
+    gemm<float>(A, B, C, M, N, K, opmode, stream);
 }
 
 template<>
-void gemm<__half>(const __half* A, const __half* B, __half* C, int M, int N, int K, cudaStream_t stream) {
-    gemm_impl(A, B, C, M, N, K, stream);
-}
-
-// Scaled GEMM
-template<typename T>
-void gemm_scaled_impl(const T* A, const T* B, T* C, int M, int N, int K, 
-                      T alpha, T beta, cudaStream_t stream) {
-    gemm_impl(A, B, C, M, N, K, stream);
-    (void)alpha; (void)beta;
-}
-
-template<>
-void gemm_scaled<float>(const float* A, const float* B, float* C, int M, int N, int K,
-                        float alpha, float beta, cudaStream_t stream) {
-    gemm_scaled_impl(A, B, C, M, N, K, alpha, beta, stream);
-}
-
-template<>
-void gemm_scaled<__half>(const __half* A, const __half* B, __half* C, int M, int N, int K,
-                         __half alpha, __half beta, cudaStream_t stream) {
-    gemm_scaled_impl(A, B, C, M, N, K, alpha, beta, stream);
+void gemm_scaled<__half>(const __half* A, const __half* B, __half* C, 
+                         int M, int N, int K, __half alpha, __half beta, 
+                         const char* opmode, cudaStream_t stream) {
+    float alpha_f = __half2float(alpha);
+    float beta_f = __half2float(beta);
+    
+    if (alpha_f != 1.0f || beta_f != 0.0f) {
+        fprintf(stderr, "ERROR: Scaled GEMM not yet implemented\n");
+        fprintf(stderr, "       Only alpha=1.0, beta=0.0 supported\n");
+        exit(EXIT_FAILURE);
+    }
+    gemm<__half>(A, B, C, M, N, K, opmode, stream);
 }
 
 } // namespace cutekernellib

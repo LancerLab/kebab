@@ -35,17 +35,53 @@ operators:
   elementwise_add:
     enabled: true
     sizes: [256, 512, 1024, 2048, 4096]
+    # Implementation: cuda (baseline) | cute (CuTe implementation)
+    impl: cute
+    # Initialization method: <lhs>-<rhs>
+    # Options: one, rand, range, row, col
+    # - one: all elements are 1.0
+    # - rand: random values in [-1, 1]
+    # - range: sequential values [0, 1, 2, ...]
+    # - row: value equals row index
+    # - col: value equals column index
+    init_method: rand-rand
+    
   gemm:
     enabled: true
-    tile_sizes: [16, 32, 64]
-    matrix_sizes: [256, 512, 1024, 2048, 4096]
+    # Implementation: cuda (baseline) | cute (CuTe/WGMMA implementation)
+    impl: cute
+    # Initialization method for matrices A and B
+    # Format: <A_init>-<B_init>
+    # Options: one, rand, range, row, col
+    init_method: rand-rand
+    # Matrix sizes for benchmarking (M=N=K for square matrices)
+    matrix_sizes: [128, 256, 512, 1024, 2048]
+    # Operation modes: specify storage format of LHS and RHS
+    # Format: <LHS_format><RHS_format>
+    # - R: Row-major storage
+    # - C: Column-major storage
+    # Examples:
+    # - RR: Both A and B are row-major (default, most common)
+    # - RC: A is row-major, B is column-major
+    # - CR: A is column-major, B is row-major
+    # - CC: Both A and B are column-major
+    modes: [RC, CR]
+    # Precision: float32, float16
+    precisions: [float16]
+    # Tile sizes (for tuning)
+    tile_sizes: [16, 32, 16]
+    verbose: false
+    
   fft:
     enabled: false
     sizes: [1024, 2048, 4096, 8192]
+    
   conv2d:
     enabled: false
     channels: [32, 64, 128]
     kernel_sizes: [3, 5, 7]
+    
   reduction:
     enabled: false
     sizes: [1024, 2048, 4096, 8192]
+

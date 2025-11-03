@@ -47,6 +47,19 @@ public:
     std::vector<int> getOperatorSizes(const std::string& op_name) const;
     std::vector<int> getOperatorTileSizes(const std::string& op_name) const;
     std::vector<int> getOperatorMatrixSizes(const std::string& op_name) const;
+    std::vector<std::string> getOperatorModes(const std::string& op_name) const;
+    std::vector<std::string> getOperatorPrecisions(const std::string& op_name) const;
+    
+    // New: Implementation selection (cuda | cute)
+    std::string getOperatorImpl(const std::string& op_name) const;
+    
+    // New: Initialization method for binary operators
+    std::string getOperatorInitMethod(const std::string& op_name) const;
+    
+    // New: Verbose output control
+    bool getOperatorVerbose(const std::string& op_name) const;
+    
+
     
     // Utility
     void reload(const std::string& config_path = "");

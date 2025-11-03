@@ -277,5 +277,47 @@ std::vector<int> ConfigParser::getOperatorMatrixSizes(const std::string& op_name
     return impl_->getVector<int>(key, {});
 }
 
+std::vector<std::string> ConfigParser::getOperatorModes(const std::string& op_name) const {
+    if (!loaded_) {
+        throw std::runtime_error("Configuration not loaded");
+    }
+    std::string key = "operators." + op_name + ".modes";
+    return impl_->getVector<std::string>(key, {"NT"});
+}
+
+std::vector<std::string> ConfigParser::getOperatorPrecisions(const std::string& op_name) const {
+    if (!loaded_) {
+        throw std::runtime_error("Configuration not loaded");
+    }
+    std::string key = "operators." + op_name + ".precisions";
+    return impl_->getVector<std::string>(key, {"float16"});
+}
+
+std::string ConfigParser::getOperatorImpl(const std::string& op_name) const {
+    if (!loaded_) {
+        throw std::runtime_error("Configuration not loaded");
+    }
+    std::string key = "operators." + op_name + ".impl";
+    return impl_->get<std::string>(key, "cute");
+}
+
+std::string ConfigParser::getOperatorInitMethod(const std::string& op_name) const {
+    if (!loaded_) {
+        throw std::runtime_error("Configuration not loaded");
+    }
+    std::string key = "operators." + op_name + ".init_method";
+    return impl_->get<std::string>(key, "rand-rand");
+}
+
+bool ConfigParser::getOperatorVerbose(const std::string& op_name) const {
+    if (!loaded_) {
+        throw std::runtime_error("Configuration not loaded");
+    }
+    std::string key = "operators." + op_name + ".verbose";
+    return impl_->get<bool>(key, false);
+}
+
+
+
 } // namespace config
 } // namespace cutekernellib
