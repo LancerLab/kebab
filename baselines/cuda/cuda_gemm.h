@@ -6,34 +6,24 @@
 namespace baseline {
 
 /**
- * @brief Hand-optimized CUDA baseline for GEMM: C = A * B
+ * @brief CUDA baseline GEMM with version dispatch
  * 
- * This implementation uses the same API signature as the CuTe version
- * for fair performance comparison.
+ * Version 1: Naive implementation (no tiling, no optimization)
+ * Version 2: Shared memory tiling (future)
+ * Version 3: WMMA Tensor Cores (future)
  * 
- * Optimizations:
- * - Tensor Core utilization via wmma/mma.sync instructions
- * - Shared memory tiling (128x128 tiles with 32x32 sub-tiles)
- * - Double buffering for overlapping compute and memory
- * - Warp-level matrix operations for maximum throughput
- * - Memory coalescing for optimal bandwidth utilization
- * - Register blocking to maximize occupancy
- * 
- * Performance targets:
- * - Competitive with cuBLAS performance
- * - High Tensor Core utilization (>80%)
- * - Optimal memory bandwidth usage
- * 
- * @param A Input matrix A (M x K, row-major)
- * @param B Input matrix B (K x N, row-major)
+ * @param A Input matrix A (M x K, storage format depends on opmode)
+ * @param B Input matrix B (K x N, storage format depends on opmode)
  * @param C Output matrix C (M x N, row-major)
  * @param M Number of rows in A and C
  * @param N Number of columns in B and C
  * @param K Number of columns in A and rows in B
+ * @param opmode Storage format: "RC" (A row-major, B col-major), "CR" (A col-major, B row-major)
+ * @param version Kernel variant ID (default: 1)
  * @param stream CUDA stream for asynchronous execution (default: 0)
  */
-void gemm(const float* A, const float* B, float* C, int M, int N, int K, cudaStream_t stream = 0);
-void gemm(const __half* A, const __half* B, __half* C, int M, int N, int K, cudaStream_t stream = 0);
+void gemm(const float* A, const float* B, float* C, int M, int N, int K, const char* opmode = "RR", int version = 1, cudaStream_t stream = 0);
+void gemm(const __half* A, const __half* B, __half* C, int M, int N, int K, const char* opmode = "RR", int version = 1, cudaStream_t stream = 0);
 
 /**
  * @brief GEMM with alpha and beta scaling: C = alpha * A * B + beta * C

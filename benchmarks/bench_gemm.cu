@@ -159,6 +159,7 @@ void benchmarkGEMM(const ConfigParser& config) {
     
     // Get configuration
     std::string impl = config.getOperatorImpl("gemm");
+    int version = config.getOperatorVersion("gemm");
     std::string init_method = config.getOperatorInitMethod("gemm");
     std::vector<std::string> opmode_list = config.getOperatorModes("gemm");
     auto matrix_sizes = config.getOperatorMatrixSizes("gemm");
@@ -170,7 +171,7 @@ void benchmarkGEMM(const ConfigParser& config) {
     auto [init_A, init_B] = parseBinaryInitMethod(init_method);
     
     std::cout << "Configuration:" << std::endl;
-    std::cout << "  Implementation: " << impl << std::endl;
+    std::cout << "  Implementation: " << impl << " (version " << version << ")" << std::endl;
     std::cout << "  Modes: ";
     // verbose Mode in modelist
     for (const auto& opmode : opmode_list) {
@@ -263,9 +264,9 @@ void benchmarkGEMM(const ConfigParser& config) {
             
             auto kernel = [&]() {
                 if (impl == "cute") {
-                    cutekernellib::gemm(d_A, d_B, d_C, M, N, K, opmode.c_str());
+                    cutekernellib::gemm(d_A, d_B, d_C, M, N, K, opmode.c_str(), version);
                 } else {
-                    baseline::gemm(d_A, d_B, d_C, M, N, K);
+                    baseline::gemm(d_A, d_B, d_C, M, N, K, opmode.c_str(), version);
                 }
             };
             float latency = runner.measureLatency(kernel);
@@ -325,9 +326,9 @@ void benchmarkGEMM(const ConfigParser& config) {
             // Reset C for verification
             CUDA_CHECK(cudaMemset(d_C, 0, M * N * sizeof(T)));
             if (impl == "cute") {
-                cutekernellib::gemm(d_A, d_B, d_C, M, N, K, opmode.c_str());
+                cutekernellib::gemm(d_A, d_B, d_C, M, N, K, opmode.c_str(), version);
             } else {
-                baseline::gemm(d_A, d_B, d_C, M, N, K);
+                baseline::gemm(d_A, d_B, d_C, M, N, K, opmode.c_str(), version);
             }
             
             bool correct = verifyGEMM(d_A, d_B, d_C, M, N, K, opmode, tolerance);

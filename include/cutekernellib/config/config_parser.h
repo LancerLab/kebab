@@ -53,6 +53,9 @@ public:
     // New: Implementation selection (cuda | cute)
     std::string getOperatorImpl(const std::string& op_name) const;
     
+    // New: Version selection for kernel variants
+    int getOperatorVersion(const std::string& op_name) const;
+    
     // New: Initialization method for binary operators
     std::string getOperatorInitMethod(const std::string& op_name) const;
     

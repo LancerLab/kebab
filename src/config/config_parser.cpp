@@ -301,6 +301,14 @@ std::string ConfigParser::getOperatorImpl(const std::string& op_name) const {
     return impl_->get<std::string>(key, "cute");
 }
 
+int ConfigParser::getOperatorVersion(const std::string& op_name) const {
+    if (!loaded_) {
+        throw std::runtime_error("Configuration not loaded");
+    }
+    std::string key = "operators." + op_name + ".version";
+    return impl_->get<int>(key, 1);
+}
+
 std::string ConfigParser::getOperatorInitMethod(const std::string& op_name) const {
     if (!loaded_) {
         throw std::runtime_error("Configuration not loaded");

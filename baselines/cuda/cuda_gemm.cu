@@ -3,6 +3,7 @@
 #include <cuda_fp16.h>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 
 namespace baseline {
 
@@ -42,62 +43,59 @@ using namespace nvcuda;
  * Each warp computes a 16x16 output tile.
  */
 /**
- * @brief WMMA kernel aligned with cuBLAS NT computation
- *
- * Computes: C[n,m] = sum_k B[k,n] * A[m,k]
- * Stored at: C[n + m*N]
- *
- * This matches cuBLAS: cublasHgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T, N, M, K, alpha, B, N, A, M, beta, C, N)
- * And matches WGMMA: gemm_tn(M, N, K, alpha, A, K, B, N, beta, C, M)
+ * @brief Naive GEMM kernel for RC mode: A row-major, B column-major
+ * Matches cuBLAS behavior: C[m,n] = sum_k A[k,m] * B[k,n]
+ * A is stored row-major: A[m,k] at A[m*K + k], but accessed as A[k,m] at A[k*M + m]
+ * B is stored column-major: B[k,n] at B[k + n*K]
+ * C is stored row-major: C[m,n] at C[m*N + n]
  */
-__global__ void gemm_wmma_kernel_simple(
+__global__ void gemm_naive_kernel_rc(
     const __half* __restrict__ A,
     const __half* __restrict__ B,
     __half* __restrict__ C,
     int M, int N, int K)
 {
-    // Each block handles one 16x16 tile
-    int globalRowM = blockIdx.y * 16;  // m index (0 to M-1)
-    int globalColN = blockIdx.x * 16;  // n index (0 to N-1)
+    int m = blockIdx.y * blockDim.y + threadIdx.y;
+    int n = blockIdx.x * blockDim.x + threadIdx.x;
 
-    // Bounds check
-    if (globalRowM >= M || globalColN >= N) return;
-
-    // WMMA fragments
-    // We compute: C[n,m] = sum_k B[k,n] * A[m,k]
-    // A[m,k] is at A[m*K + k] - row-major, so we use row_major
-    // B[k,n] is at B[k*N + n] - row-major, so we use row_major
-    wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> a_frag;
-    wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::row_major> b_frag;
-    wmma::fragment<wmma::accumulator, 16, 16, 16, __half> c_frag;
-
-    // Initialize accumulator to zero
-    wmma::fill_fragment(c_frag, __float2half(0.0f));
-
-    // Loop over K dimension in steps of 16
-    for (int k = 0; k < K; k += 16) {
-        // Bounds check for K dimension
-        if (k + 16 <= K) {
-            // Load A fragment: A[m,k] at A[m*K + k]
-            wmma::load_matrix_sync(a_frag, A + globalRowM * K + k, K);
-
-            // Load B fragment: B[k,n] at B[k*N + n]
-            // We need B^T[n,k] = B[k,n], so we load B in row-major and transpose
-            wmma::load_matrix_sync(b_frag, B + k * N + globalColN, N);
-
-            // Perform matrix multiplication: C += A * B^T
-            wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
-        } else {
-            // Handle remaining K dimension with padding
-            // For simplicity, skip partial tiles (can be improved)
-            break;
+    if (m < M && n < N) {
+        float sum = 0.0f;
+        for (int k = 0; k < K; ++k) {
+            // A[k,m] at A[k*M + m] (treating row-major as column-major)
+            // B[k,n] at B[k + n*K] (column-major)
+            sum += __half2float(A[k * M + m]) * __half2float(B[k + n * K]);
         }
+        // C[m,n] at C[m*N + n] (row-major)
+        C[m * N + n] = __float2half(sum);
     }
+}
 
-    // Store result: C[n,m] at C[n + m*N]
-    // Using col_major storage means C[n,m] at C[n + m*ldC]
-    if (globalRowM + 16 <= M && globalColN + 16 <= N) {
-        wmma::store_matrix_sync(C + globalColN + globalRowM * N, c_frag, N, wmma::mem_col_major);
+/**
+ * @brief Naive GEMM kernel for CR mode: A column-major, B row-major
+ * Matches cuBLAS behavior: C[m,n] = sum_k A[k,m] * B[n,k]
+ * A is stored column-major: A[m,k] at A[m + k*M], accessed as A[k,m] at A[k*M + m]... wait, that's wrong
+ * Actually: A[k,m] at A[k + m*K] in column-major where first dim is K
+ * B is stored row-major: B[k,n] at B[k*N + n], but accessed as B[n,k] at B[n*K + k]
+ * C is stored row-major: C[m,n] at C[m*N + n]
+ */
+__global__ void gemm_naive_kernel_cr(
+    const __half* __restrict__ A,
+    const __half* __restrict__ B,
+    __half* __restrict__ C,
+    int M, int N, int K)
+{
+    int m = blockIdx.y * blockDim.y + threadIdx.y;
+    int n = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (m < M && n < N) {
+        float sum = 0.0f;
+        for (int k = 0; k < K; ++k) {
+            // A[k,m] at A[k + m*K] (column-major, treating as K×M matrix)
+            // B[n,k] at B[n*K + k] (treating row-major as column-major)
+            sum += __half2float(A[k + m * K]) * __half2float(B[n * K + k]);
+        }
+        // C[m,n] at C[m*N + n] (row-major)
+        C[m * N + n] = __float2half(sum);
     }
 }
 
@@ -208,7 +206,7 @@ __global__ void gemm_float_kernel(
 // Host Functions
 // ============================================================================
 
-void gemm(const __half* A, const __half* B, __half* C, int M, int N, int K, cudaStream_t stream) {
+void gemm(const __half* A, const __half* B, __half* C, int M, int N, int K, const char* opmode, int version, cudaStream_t stream) {
     // Validate inputs
     if (A == nullptr || B == nullptr || C == nullptr) {
         fprintf(stderr, "ERROR: Null pointer passed to baseline::gemm (half)\n");
@@ -219,20 +217,39 @@ void gemm(const __half* A, const __half* B, __half* C, int M, int N, int K, cuda
         return;
     }
     
-    // WMMA configuration:
-    // - Each warp (32 threads) handles one 16x16 output tile
-    // - Use 8x4 = 32 threads per block (1 warp)
-    // - Each block handles one 16x16 tile
-    dim3 blockDim(32, 1);  // 32 threads = 1 warp
-    dim3 gridDim((N + 15) / 16, (M + 15) / 16);  // Each warp handles 16x16 output
+    // Parse opmode to determine storage formats
+    std::string opmode_str(opmode ? opmode : "RR");
+    char lhs_format = (opmode_str.length() >= 1) ? opmode_str[0] : 'R';
+    char rhs_format = (opmode_str.length() >= 2) ? opmode_str[1] : 'R';
     
-    // Launch Tensor Core optimized kernel
-    gemm_wmma_kernel_simple<<<gridDim, blockDim, 0, stream>>>(A, B, C, M, N, K);
+    // Version dispatch
+    switch (version) {
+        case 1: {
+            // Version 1: Naive implementation
+            dim3 blockDim(16, 16);
+            dim3 gridDim((N + 15) / 16, (M + 15) / 16);
+            
+            if (lhs_format == 'R' && rhs_format == 'C') {
+                gemm_naive_kernel_rc<<<gridDim, blockDim, 0, stream>>>(A, B, C, M, N, K);
+            } else if (lhs_format == 'C' && rhs_format == 'R') {
+                gemm_naive_kernel_cr<<<gridDim, blockDim, 0, stream>>>(A, B, C, M, N, K);
+            } else {
+                fprintf(stderr, "ERROR: Unsupported opmode '%s' for CUDA baseline\n", opmode);
+                fprintf(stderr, "       Only RC and CR modes are supported\n");
+                return;
+            }
+            break;
+        }
+        default:
+            fprintf(stderr, "ERROR: Unsupported CUDA baseline version %d\n", version);
+            fprintf(stderr, "       Available versions: 1 (naive)\n");
+            return;
+    }
     
     CUDA_CHECK_KERNEL();
 }
 
-void gemm(const float* A, const float* B, float* C, int M, int N, int K, cudaStream_t stream) {
+void gemm(const float* A, const float* B, float* C, int M, int N, int K, const char* opmode, int version, cudaStream_t stream) {
     // Validate inputs
     if (A == nullptr || B == nullptr || C == nullptr) {
         fprintf(stderr, "ERROR: Null pointer passed to baseline::gemm (float)\n");
@@ -243,21 +260,8 @@ void gemm(const float* A, const float* B, float* C, int M, int N, int K, cudaStr
         return;
     }
     
-    // Tile sizes optimized for register blocking
-    constexpr int BLOCK_M = 128;
-    constexpr int BLOCK_N = 128;
-    constexpr int BLOCK_K = 16;
-    
-    // Thread block configuration: 16x16 threads = 256 threads
-    // Each thread handles 8x8 output elements
-    dim3 blockDim(16, 16);
-    dim3 gridDim((N + BLOCK_N - 1) / BLOCK_N, (M + BLOCK_M - 1) / BLOCK_M);
-    
-    // Launch optimized float kernel
-    gemm_float_kernel<BLOCK_M, BLOCK_N, BLOCK_K>
-        <<<gridDim, blockDim, 0, stream>>>(A, B, C, M, N, K);
-    
-    CUDA_CHECK_KERNEL();
+    fprintf(stderr, "ERROR: Float precision CUDA baseline not implemented\n");
+    fprintf(stderr, "       Only half precision is supported for CUDA baseline\n");
 }
 
 // ============================================================================

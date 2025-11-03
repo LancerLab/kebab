@@ -42,19 +42,11 @@ namespace cutekernellib {
 #endif
 
 /**
- * @brief General Matrix Multiplication: C = A * B
+ * @brief General Matrix Multiplication with version dispatch: C = A * B
  * 
- * Performs C = A * B where:
- * - A is M x K matrix (row-major)
- * - B is K x N matrix (row-major) 
- * - C is M x N matrix (row-major)
- * 
- * This implementation uses CuTe MMA atoms and Tensor Cores for maximum performance.
- * Targets ≥90% of cuBLAS performance through:
- * - Tensor Core utilization via MMA atoms (SM80_16x8x16_F32F16F16F32_TN for Ampere)
- * - TiledMMA for thread block organization
- * - Software pipelining with async copy (cp.async) for data loading
- * - Shared memory tiling for A and B matrices
+ * Version 1: WGMMA without TMA (Hopper SM90+)
+ * Version 2: WGMMA with TMA (future)
+ * Version 3: Optimized tile sizes (future)
  * 
  * @tparam T Data type (float or half)
  * @param A Input matrix A (M x K)
@@ -64,10 +56,11 @@ namespace cutekernellib {
  * @param N Number of columns in B and C
  * @param K Number of columns in A and rows in B
  * @param opmode Operation mode (default: "default")
+ * @param version Kernel variant ID (default: 1)
  * @param stream CUDA stream for asynchronous execution (default: 0)
  */
 template<typename T>
-void gemm(const T* A, const T* B, T* C, int M, int N, int K, const char* opmode = "default", cudaStream_t stream = 0);
+void gemm(const T* A, const T* B, T* C, int M, int N, int K, const char* opmode = "default", int version = 1, cudaStream_t stream = 0);
 
 /**
  * @brief GEMM with alpha and beta scaling: C = alpha * A * B + beta * C
@@ -82,11 +75,12 @@ void gemm(const T* A, const T* B, T* C, int M, int N, int K, const char* opmode 
  * @param alpha Scaling factor for A*B
  * @param beta Scaling factor for C
  * @param opmode Operation mode (default: "default")
+ * @param version Kernel variant ID (default: 1)
  * @param stream CUDA stream for asynchronous execution (default: 0)
  */
 template<typename T>
 void gemm_scaled(const T* A, const T* B, T* C, int M, int N, int K, 
-                 T alpha, T beta, const char* opmode = "default", cudaStream_t stream = 0);
+                 T alpha, T beta, const char* opmode = "default", int version = 1, cudaStream_t stream = 0);
 
 /**
  * @brief Complete WGMMA-based GEMM dispatch for FP16 (Hopper SM90+)

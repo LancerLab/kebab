@@ -44,7 +44,7 @@ __global__ void convert_fp16_to_fp32(const __half* in, float* out, int n) {
  */
 template<>
 void gemm<float>(const float* A, const float* B, float* C, 
-                 int M, int N, int K, const char* opmode, cudaStream_t stream) {
+                 int M, int N, int K, const char* opmode, int version, cudaStream_t stream) {
     // Check device capability
     int device;
     cudaDeviceProp prop;
@@ -101,7 +101,7 @@ void gemm<float>(const float* A, const float* B, float* C,
  */
 template<>
 void gemm<__half>(const __half* A, const __half* B, __half* C, 
-                  int M, int N, int K, const char* opmode, cudaStream_t stream) {
+                  int M, int N, int K, const char* opmode, int version, cudaStream_t stream) {
     // Check device capability
     int device;
     cudaDeviceProp prop;
@@ -132,19 +132,19 @@ void gemm<__half>(const __half* A, const __half* B, __half* C,
 template<>
 void gemm_scaled<float>(const float* A, const float* B, float* C, 
                         int M, int N, int K, float alpha, float beta, 
-                        const char* opmode, cudaStream_t stream) {
+                        const char* opmode, int version, cudaStream_t stream) {
     if (alpha != 1.0f || beta != 0.0f) {
         fprintf(stderr, "ERROR: Scaled GEMM not yet implemented\n");
         fprintf(stderr, "       Only alpha=1.0, beta=0.0 supported\n");
         exit(EXIT_FAILURE);
     }
-    gemm<float>(A, B, C, M, N, K, opmode, stream);
+    gemm<float>(A, B, C, M, N, K, opmode, version, stream);
 }
 
 template<>
 void gemm_scaled<__half>(const __half* A, const __half* B, __half* C, 
                          int M, int N, int K, __half alpha, __half beta, 
-                         const char* opmode, cudaStream_t stream) {
+                         const char* opmode, int version, cudaStream_t stream) {
     float alpha_f = __half2float(alpha);
     float beta_f = __half2float(beta);
     
@@ -153,7 +153,7 @@ void gemm_scaled<__half>(const __half* A, const __half* B, __half* C,
         fprintf(stderr, "       Only alpha=1.0, beta=0.0 supported\n");
         exit(EXIT_FAILURE);
     }
-    gemm<__half>(A, B, C, M, N, K, opmode, stream);
+    gemm<__half>(A, B, C, M, N, K, opmode, version, stream);
 }
 
 } // namespace cutekernellib
