@@ -425,127 +425,44 @@ setup:
 	@echo "=========================================="
 
 # ============================================================================
-# Build Target - Compile Configuration Parser, Operators, and Baselines
+# Build Target - Use CMake as unified build system
 # ============================================================================
-build: $(BUILD_DIR)/libcutekernellib_config.a $(BUILD_DIR)/libcutekernellib.a $(BUILD_DIR)/libcutekernellib_baselines.a
+build: cmake-build
 
-$(BUILD_DIR)/config_parser.o: $(SRC_DIR)/config/config_parser.cpp
-	@echo "Compiling configuration parser..."
+cmake-configure:
+	@echo "=========================================="
+	@echo "Configuring CMake build system..."
+	@echo "=========================================="
 	@$(MKDIR) $(BUILD_DIR)
-	$(CXX) $(CXX_FLAGS) -I$(YAML_CPP_DIR)/include -c $< -o $@
-	@echo "  ✓ Configuration parser compiled"
+	@cd $(BUILD_DIR) && cmake -DCMAKE_BUILD_TYPE=$(shell echo $(BUILD_MODE) | sed 's/debug/Debug/;s/release/Release/') \
+		-DCUDA_ARCH=$(CUDA_ARCH) \
+		-DCUDA_PATH=$(CUDA_PATH) \
+		../kebab
+	@echo "  ✓ CMake configuration complete"
 
-$(BUILD_DIR)/libcutekernellib_config.a: $(BUILD_DIR)/config_parser.o
-	@echo "Creating configuration library..."
-	ar rcs $@ $^
-	ranlib $@
-	@echo "  ✓ Library created: $@"
-
-# Compile operators
-$(BUILD_DIR)/elementwise_add.o: $(SRC_DIR)/operators/elementwise_add.cu
-	@echo "Compiling elementwise_add operator..."
-	@$(MKDIR) $(BUILD_DIR)
-	$(NVCC) $(NVCC_FLAGS) -c $< -o $@
-	@echo "  ✓ elementwise_add operator compiled"
-
-$(BUILD_DIR)/gemm.o: $(SRC_DIR)/operators/gemm.cu
-	@echo "Compiling gemm operator..."
-	@$(MKDIR) $(BUILD_DIR)
-	$(NVCC) $(NVCC_FLAGS) -c $< -o $@
-	@echo "  ✓ gemm operator compiled"
-
-$(BUILD_DIR)/gemm_wgmma.o: $(SRC_DIR)/operators/gemm_wgmma.cu
-	@echo "Compiling gemm_wgmma operator (Hopper WGMMA)..."
-	@$(MKDIR) $(BUILD_DIR)
-	$(NVCC) $(NVCC_FLAGS) -c $< -o $@
-	@echo "  ✓ gemm_wgmma operator compiled"
-
-$(BUILD_DIR)/gemm_wgmma_tma.o: $(SRC_DIR)/operators/gemm_wgmma_tma.cu
-	@echo "Compiling gemm_wgmma_tma operator (Hopper WGMMA with TMA)..."
-	@$(MKDIR) $(BUILD_DIR)
-	$(NVCC) $(NVCC_FLAGS) -c $< -o $@
-	@echo "  ✓ gemm_wgmma_tma operator compiled"
-
-# Create operator library
-OPERATOR_OBJS := $(patsubst %,$(BUILD_DIR)/%.o,$(OPERATORS))
-OPERATOR_OBJS += $(BUILD_DIR)/gemm_wgmma.o $(BUILD_DIR)/gemm_wgmma_tma.o
-
-$(BUILD_DIR)/libcutekernellib.a: $(OPERATOR_OBJS)
-	@echo "Creating operator library..."
-	ar rcs $@ $^
-	ranlib $@
-	@echo "  ✓ Operator library created: $@"
-
-# Compile baselines
-$(BUILD_DIR)/cuda_elementwise_add.o: $(BASELINES_DIR)/cuda/cuda_elementwise_add.cu
-	@echo "Compiling CUDA baseline: cuda_elementwise_add..."
-	@$(MKDIR) $(BUILD_DIR)
-	$(NVCC) $(NVCC_FLAGS) -I$(BASELINES_DIR)/cuda -c $< -o $@
-	@echo "  ✓ CUDA baseline cuda_elementwise_add compiled"
-
-$(BUILD_DIR)/cuda_gemm.o: $(BASELINES_DIR)/cuda/cuda_gemm.cu
-	@echo "Compiling CUDA baseline: cuda_gemm..."
-	@$(MKDIR) $(BUILD_DIR)
-	$(NVCC) $(NVCC_FLAGS) -I$(BASELINES_DIR)/cuda -c $< -o $@
-	@echo "  ✓ CUDA baseline cuda_gemm compiled"
-
-# Create baseline library
-BASELINE_OBJS := $(patsubst %,$(BUILD_DIR)/%.o,$(BASELINES))
-
-$(BUILD_DIR)/libcutekernellib_baselines.a: $(BASELINE_OBJS)
-	@echo "Creating baseline library..."
-	ar rcs $@ $^
-	ranlib $@
-	@echo "  ✓ Baseline library created: $@"
+cmake-build: cmake-configure
+	@echo "=========================================="
+	@echo "Building with CMake..."
+	@echo "=========================================="
+	@cd $(BUILD_DIR) && make -j$$(nproc)
+	@echo "  ✓ Build complete"
 
 # ============================================================================
 # Benchmark Targets
 # ============================================================================
 
-# Compile benchmark runner
-$(BUILD_DIR)/benchmark_runner.o: $(BENCHMARKS_DIR)/benchmark_runner.cpp
-	@echo "Compiling benchmark runner..."
-	@$(MKDIR) $(BUILD_DIR)
-	$(CXX) $(CXX_FLAGS) -c $< -o $@
-	@echo "  ✓ Benchmark runner compiled"
-
-bench-elementwise-add: $(BUILD_DIR)/bench_elementwise_add
+bench-elementwise-add: build
 	@echo "=========================================="
 	@echo "Running Element-wise Add Benchmark"
 	@echo "=========================================="
-	@$(BUILD_DIR)/bench_elementwise_add
-
-$(BUILD_DIR)/bench_elementwise_add: $(BENCHMARKS_DIR)/bench_elementwise_add.cu $(BUILD_DIR)/benchmark_runner.o $(BUILD_DIR)/libcutekernellib.a $(BUILD_DIR)/libcutekernellib_baselines.a $(BUILD_DIR)/libcutekernellib_config.a
-	@echo "Compiling element-wise add benchmark..."
-	@$(MKDIR) $(BUILD_DIR)
-	@$(MKDIR) $(BENCH_RESULTS_DIR)
-	$(NVCC) $(NVCC_FLAGS) \
-		-I$(BENCHMARKS_DIR) \
-		-I$(BASELINES_DIR)/cuda \
-		$< $(BUILD_DIR)/benchmark_runner.o \
-		-L$(BUILD_DIR) -lcutekernellib -lcutekernellib_baselines -lcutekernellib_config \
-		-L$(YAML_CPP_DIR)/build -lyaml-cpp \
-		-o $@
+	@$(BUILD_DIR)/lib/benchmark/bench_elementwise_add
 	@echo "  ✓ Benchmark program compiled"
 
-bench-gemm: $(BUILD_DIR)/bench_gemm
+bench-gemm: build
 	@echo "=========================================="
 	@echo "Running GEMM Benchmark"
 	@echo "=========================================="
-	@$(BUILD_DIR)/bench_gemm
-
-$(BUILD_DIR)/bench_gemm: $(BENCHMARKS_DIR)/bench_gemm.cu $(BUILD_DIR)/benchmark_runner.o $(BUILD_DIR)/libcutekernellib.a $(BUILD_DIR)/libcutekernellib_baselines.a $(BUILD_DIR)/libcutekernellib_config.a
-	@echo "Compiling GEMM benchmark..."
-	@$(MKDIR) $(BUILD_DIR)
-	@$(MKDIR) $(BENCH_RESULTS_DIR)
-	$(NVCC) $(NVCC_FLAGS) \
-		-I$(BENCHMARKS_DIR) \
-		-I$(BASELINES_DIR)/cuda \
-		$< $(BUILD_DIR)/benchmark_runner.o \
-		-L$(BUILD_DIR) -lcutekernellib -lcutekernellib_baselines -lcutekernellib_config \
-		-L$(YAML_CPP_DIR)/build -lyaml-cpp \
-		-lcublas \
-		-o $@
+	@$(BUILD_DIR)/lib/benchmark/bench_gemm
 	@echo "  ✓ Benchmark program compiled"
 
 # Benchmark all operators and generate summary report
@@ -586,73 +503,6 @@ bench-all:
 	@echo "=========================================="
 
 # ============================================================================
-# Test Targets
-# ============================================================================
-
-test-gemm-dispatch: $(BUILD_DIR)/test_gemm_dispatch
-	@echo "=========================================="
-	@echo "Running GEMM Dispatch Correctness Test"
-	@echo "=========================================="
-	@$(BUILD_DIR)/test_gemm_dispatch
-
-$(BUILD_DIR)/test_gemm_dispatch: tests/test_gemm_dispatch.cu $(BUILD_DIR)/libcutekernellib.a
-	@echo "Compiling GEMM dispatch test..."
-	@$(MKDIR) $(BUILD_DIR)
-	$(NVCC) $(NVCC_FLAGS) \
-		$< \
-		-L$(BUILD_DIR) -lcutekernellib \
-		-lcublas \
-		-o $@
-	@echo "  ✓ Test program compiled"
-
-test-gemm-simple: $(BUILD_DIR)/test_gemm_simple
-	@echo "=========================================="
-	@echo "Running Simple GEMM Dispatch Test"
-	@echo "=========================================="
-	@$(BUILD_DIR)/test_gemm_simple
-
-$(BUILD_DIR)/test_gemm_simple: tests/test_gemm_simple.cu $(BUILD_DIR)/libcutekernellib.a
-	@echo "Compiling simple GEMM test..."
-	@$(MKDIR) $(BUILD_DIR)
-	$(NVCC) $(NVCC_FLAGS) \
-		$< \
-		-L$(BUILD_DIR) -lcutekernellib \
-		-o $@
-	@echo "  ✓ Test program compiled"
-
-test-init-methods: $(BUILD_DIR)/test_init_methods
-	@echo "=========================================="
-	@echo "Running Initialization Methods Test"
-	@echo "=========================================="
-	@$(BUILD_DIR)/test_init_methods
-
-$(BUILD_DIR)/test_init_methods: tests/test_init_methods.cu $(BUILD_DIR)/libcutekernellib.a
-	@echo "Compiling initialization methods test..."
-	@$(MKDIR) $(BUILD_DIR)
-	$(NVCC) $(NVCC_FLAGS) \
-		$< \
-		-L$(BUILD_DIR) -lcutekernellib \
-		-lcublas \
-		-o $@
-	@echo "  ✓ Test program compiled"
-
-debug-cublas: $(BUILD_DIR)/debug_cublas
-	@echo "=========================================="
-	@echo "Running cuBLAS Configuration Debug"
-	@echo "=========================================="
-	@$(BUILD_DIR)/debug_cublas
-
-$(BUILD_DIR)/debug_cublas: tests/debug_cublas.cu $(BUILD_DIR)/libcutekernellib.a
-	@echo "Compiling cuBLAS debug test..."
-	@$(MKDIR) $(BUILD_DIR)
-	$(NVCC) $(NVCC_FLAGS) \
-		$< \
-		-L$(BUILD_DIR) -lcutekernellib \
-		-lcublas \
-		-o $@
-	@echo "  ✓ Test program compiled"
-
-# ============================================================================
 # Profiling Targets - Nsight Compute Integration
 # ============================================================================
 
@@ -682,7 +532,7 @@ ifeq ($(NVIDIA_SMI),)
     NVIDIA_SMI := $(firstword $(foreach path,$(NVIDIA_SMI_SEARCH_PATHS),$(wildcard $(path))))
 endif
 
-tune-elementwise-add: $(BUILD_DIR)/bench_elementwise_add
+tune-elementwise-add: build
 	@echo "=========================================="
 	@echo "Profiling Element-wise Add with Nsight Compute"
 	@echo "=========================================="
@@ -755,7 +605,7 @@ tune-elementwise-add: $(BUILD_DIR)/bench_elementwise_add
 	fi
 	@echo "=========================================="
 
-tune-gemm: $(BUILD_DIR)/bench_gemm
+tune-gemm: build
 	@echo "=========================================="
 	@echo "Profiling GEMM with Nsight Compute"
 	@echo "=========================================="
