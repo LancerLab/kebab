@@ -39,7 +39,7 @@ operators:
     gpu_id: 0
     sizes: [256, 512, 1024, 2048, 4096]
     # Implementation: cuda (baseline) | cute (CuTe implementation)
-    impl: cute
+    impl: cuda
     # Initialization method: <lhs>-<rhs>
     # Options: one, rand, range, row, col
     # - one: all elements are 1.0
@@ -66,7 +66,7 @@ operators:
     # Options: one, rand, range, row, col
     init_method: rand-rand
     # Matrix sizes for benchmarking (M=N=K for square matrices)
-    matrix_sizes: [4096]
+    matrix_sizes: [1024, 2048, 4096]
     # Operation modes: specify storage format of LHS and RHS
     # Format: <LHS_format><RHS_format>
     # - R: Row-major storage
@@ -76,7 +76,7 @@ operators:
     # - RC: A is row-major, B is column-major
     # - CR: A is column-major, B is row-major
     # - CC: Both A and B are column-major
-    modes: [RC]
+    modes: [RC, CR]
     # Precision: float32, float16
     precisions: [float16]
     # Tile sizes (for tuning): [M, N, K]

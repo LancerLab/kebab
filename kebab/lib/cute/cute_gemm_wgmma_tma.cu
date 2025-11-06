@@ -387,41 +387,46 @@ void gemm_wgmma_tma_fp16_dispatch(const void* A_ptr, const void* B_ptr, void* C_
     }
 }
 
+// Static cache for tile sizes to avoid repeated config file reads
+static bool g_tile_sizes_cached = false;
+static int g_cached_tile_M = 128;
+static int g_cached_tile_N = 128;
+static int g_cached_tile_K = 64;
+
 /**
  * @brief WGMMA with TMA dispatch with config support
  */
 void gemm_wgmma_tma_fp16(const void* A_ptr, const void* B_ptr, void* C_ptr,
-                         int M, int N, int K, 
+                         int M, int N, int K,
                          char lhs_format, char rhs_format,
                          cudaStream_t stream)
 {
-    try {
-        // Get configuration instance
-        auto& config = kebab::config::ConfigParser::getInstance();
-        
-        // Get tile sizes from configuration
-        auto tile_sizes = config.getOperatorTileSizes("gemm");
-        
-        int tile_M = 128, tile_N = 128, tile_K = 64; // Default values
-        
-        if (tile_sizes.size() >= 3) {
-            tile_M = tile_sizes[0];
-            tile_N = tile_sizes[1];
-            tile_K = tile_sizes[2];
+    // Load tile sizes from config only once (avoid repeated file I/O)
+    if (!g_tile_sizes_cached) {
+        try {
+            // Get configuration instance
+            auto& config = kebab::config::ConfigParser::getInstance();
+
+            // Get tile sizes from configuration
+            auto tile_sizes = config.getOperatorTileSizes("gemm");
+
+            if (tile_sizes.size() >= 3) {
+                g_cached_tile_M = tile_sizes[0];
+                g_cached_tile_N = tile_sizes[1];
+                g_cached_tile_K = tile_sizes[2];
+            }
+        } catch (const std::exception& e) {
+            // Fallback to default tile sizes if config loading fails
+            fprintf(stderr, "Warning: Failed to load tile sizes from config for TMA: %s\n", e.what());
+            fprintf(stderr, "Using default tile sizes: 128x128x64\n");
         }
-        
-        // Call dispatch function with configured tile sizes
-        gemm_wgmma_tma_fp16_dispatch(A_ptr, B_ptr, C_ptr, M, N, K, 
-                                    lhs_format, rhs_format, 
-                                    tile_M, tile_N, tile_K, stream);
-    } catch (const std::exception& e) {
-        // Fallback to default tile sizes if config loading fails
-        fprintf(stderr, "Warning: Failed to load tile sizes from config for TMA: %s\n", e.what());
-        fprintf(stderr, "Using default tile sizes: 128x128x64\n");
-        gemm_wgmma_tma_fp16_dispatch(A_ptr, B_ptr, C_ptr, M, N, K, 
-                                    lhs_format, rhs_format, 
-                                    128, 128, 64, stream);
+        g_tile_sizes_cached = true;
     }
+
+    // Call dispatch function with cached tile sizes
+    gemm_wgmma_tma_fp16_dispatch(A_ptr, B_ptr, C_ptr, M, N, K,
+                                lhs_format, rhs_format,
+                                g_cached_tile_M, g_cached_tile_N, g_cached_tile_K, stream);
 }
 
 } // namespace cute

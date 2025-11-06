@@ -74,8 +74,11 @@ void benchmarkElementwiseAdd(const std::vector<int>& batch_sizes,
         
         CUDA_CHECK(cudaMemcpy(d_A, h_A.data(), N * sizeof(T), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(d_B, h_B.data(), N * sizeof(T), cudaMemcpyHostToDevice));
-        
+
         // Benchmark CUDA baseline first (for speedup calculation)
+        // Clear output buffer BEFORE timing
+        CUDA_CHECK(cudaMemset(d_C, 0, N * sizeof(T)));
+
         auto cuda_kernel = [&]() {
             baseline::elementwise_add(d_A, d_B, d_C, N);
         };
@@ -87,12 +90,15 @@ void benchmarkElementwiseAdd(const std::vector<int>& batch_sizes,
         
         baseline_latencies.push_back(cuda_latency);
         
-        BenchmarkResult cuda_result("elementwise_add", "CUDA", N, 
+        BenchmarkResult cuda_result("elementwise_add", "CUDA", N,
                                    cuda_latency, cuda_throughput, 1.0f);
         BenchmarkRunner::printResult(cuda_result);
         csv.writeResult(cuda_result);
-        
+
         // Benchmark CuTe implementation
+        // Clear output buffer BEFORE timing
+        CUDA_CHECK(cudaMemset(d_C, 0, N * sizeof(T)));
+
         auto cute_kernel = [&]() {
             kebab::cute::elementwise_add(d_A, d_B, d_C, N);
         };

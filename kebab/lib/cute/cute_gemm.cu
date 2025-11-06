@@ -17,6 +17,10 @@
 namespace kebab {
 namespace cute {
 
+// Static flag to check device capability only once
+static bool g_device_checked = false;
+static bool g_device_valid = false;
+
 /**
  * @brief Conversion kernels for FP32 <-> FP16
  */
@@ -38,17 +42,26 @@ __global__ void convert_fp16_to_fp32(const __half* in, float* out, int n) {
  * @brief FP32 GEMM - converts to FP16 and uses WGMMA
  */
 template <>
-void gemm<float>(const float* A, const float* B, float* C, 
+void gemm<float>(const float* A, const float* B, float* C,
                  int M, int N, int K, const char* opmode, int version, cudaStream_t stream) {
-    // Check device capability
-    int device;
-    cudaDeviceProp prop;
-    CUDA_CHECK(cudaGetDevice(&device));
-    CUDA_CHECK(cudaGetDeviceProperties(&prop, device));
-    
-    if (prop.major < 9) {
-        fprintf(stderr, "ERROR: This implementation requires SM90+ (Hopper) GPU\n");
-        fprintf(stderr, "       Detected: SM%d.%d\n", prop.major, prop.minor);
+    // Check device capability only once (avoid repeated cudaGetDevice/cudaGetDeviceProperties calls)
+    if (!g_device_checked) {
+        int device;
+        cudaDeviceProp prop;
+        CUDA_CHECK(cudaGetDevice(&device));
+        CUDA_CHECK(cudaGetDeviceProperties(&prop, device));
+
+        if (prop.major < 9) {
+            fprintf(stderr, "ERROR: This implementation requires SM90+ (Hopper) GPU\n");
+            fprintf(stderr, "       Detected: SM%d.%d\n", prop.major, prop.minor);
+            g_device_valid = false;
+        } else {
+            g_device_valid = true;
+        }
+        g_device_checked = true;
+    }
+
+    if (!g_device_valid) {
         exit(EXIT_FAILURE);
     }
     
@@ -108,28 +121,37 @@ void gemm<float>(const float* A, const float* B, float* C,
  * @brief FP16 GEMM - direct WGMMA
  */
 template <>
-void gemm<__half>(const __half* A, const __half* B, __half* C, 
+void gemm<__half>(const __half* A, const __half* B, __half* C,
                   int M, int N, int K, const char* opmode, int version, cudaStream_t stream) {
-    // Check device capability
-    int device;
-    cudaDeviceProp prop;
-    CUDA_CHECK(cudaGetDevice(&device));
-    CUDA_CHECK(cudaGetDeviceProperties(&prop, device));
-    
-    if (prop.major < 9) {
-        fprintf(stderr, "ERROR: This implementation requires SM90+ (Hopper) GPU\n");
-        fprintf(stderr, "       Detected: SM%d.%d\n", prop.major, prop.minor);
+    // Check device capability only once (avoid repeated cudaGetDevice/cudaGetDeviceProperties calls)
+    if (!g_device_checked) {
+        int device;
+        cudaDeviceProp prop;
+        CUDA_CHECK(cudaGetDevice(&device));
+        CUDA_CHECK(cudaGetDeviceProperties(&prop, device));
+
+        if (prop.major < 9) {
+            fprintf(stderr, "ERROR: This implementation requires SM90+ (Hopper) GPU\n");
+            fprintf(stderr, "       Detected: SM%d.%d\n", prop.major, prop.minor);
+            g_device_valid = false;
+        } else {
+            g_device_valid = true;
+        }
+        g_device_checked = true;
+    }
+
+    if (!g_device_valid) {
         exit(EXIT_FAILURE);
     }
-    
+
     // Parse opmode: <LHS_format><RHS_format> where format is R (row-major) or C (column-major)
     std::string opmode_str(opmode);
-    std::transform(opmode_str.begin(), opmode_str.end(), opmode_str.begin(), 
+    std::transform(opmode_str.begin(), opmode_str.end(), opmode_str.begin(),
                    [](unsigned char c){ return std::toupper(c); });
-    
+
     char lhs_format = (opmode_str.length() >= 1) ? opmode_str[0] : 'R';
     char rhs_format = (opmode_str.length() >= 2) ? opmode_str[1] : 'R';
-    
+
     // Version dispatch
     switch (version) {
         case 1:

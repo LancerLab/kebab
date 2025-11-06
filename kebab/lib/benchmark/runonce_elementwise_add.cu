@@ -82,10 +82,14 @@ void runOnceElementwiseAdd(const ConfigParser& config) {
     CUDA_CHECK(cudaDeviceSynchronize());
     
     std::cout << "Running kernel once..." << std::endl;
-    
+
     // Run kernel exactly once (no loops, no warmup)
-    kebab::cute::elementwise_add(d_A, d_B, d_C, N);
-    
+    if (impl == "cute") {
+        kebab::cute::elementwise_add(d_A, d_B, d_C, N);
+    } else {
+        baseline::elementwise_add(d_A, d_B, d_C, N);
+    }
+
     // Synchronize after kernel
     CUDA_CHECK(cudaDeviceSynchronize());
     

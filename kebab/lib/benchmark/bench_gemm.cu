@@ -278,9 +278,12 @@ void benchmarkGEMM(const ConfigParser& config) {
             // Benchmark cuBLAS for comparison (using same configuration as verification)
             CUDA_CHECK(cudaMemset(d_C, 0, M * N * sizeof(T)));
             auto config = getCublasConfig(opmode, M, N, K);
+
+            // Create cuBLAS handle OUTSIDE the kernel lambda to avoid timing handle creation/destruction
+            cublasHandle_t handle;
+            cublasCreate(&handle);
+
             auto cublas_kernel = [&]() {
-                cublasHandle_t handle;
-                cublasCreate(&handle);
                 if constexpr (std::is_same_v<T, float>) {
                     const float alpha = 1.0f, beta = 0.0f;
                     cublasSgemm(handle, config.opB, config.opA, N, M, K,
@@ -290,10 +293,12 @@ void benchmarkGEMM(const ConfigParser& config) {
                     cublasHgemm(handle, config.opB, config.opA, N, M, K,
                                 &alpha, d_B, config.ldB, d_A, config.ldA, &beta, d_C, config.ldC);
                 }
-                cublasDestroy(handle);
             };
-            
+
             float cublas_latency = runner.measureLatency(cublas_kernel);
+
+            // Destroy cuBLAS handle AFTER measurement
+            cublasDestroy(handle);
             float cublas_gflops = runner.calculateGFLOPS(flops, cublas_latency);
             
             // Print performance results

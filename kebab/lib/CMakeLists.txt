@@ -16,10 +16,10 @@ set_target_properties(kebab_cuda PROPERTIES CUDA_ARCHITECTURES OFF)
 
 # CuTe backend - all CuTe-based implementations
 add_library(kebab_cute
-    cute/gemm_wgmma.cu
-    cute/gemm_wgmma_tma.cu
-    cute/gemm.cu
-    cute/elementwise_add.cu
+    cute/cute_gemm_wgmma.cu
+    cute/cute_gemm_wgmma_tma.cu
+    cute/cute_gemm.cu
+    cute/cute_elementwise_add.cu
 )
 target_include_directories(kebab_cute PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(kebab_cute CUDA::cublas)
