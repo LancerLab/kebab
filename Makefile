@@ -291,6 +291,9 @@ help:
 	@$(foreach op,$(OPERATORS_TGT),echo "  make tune-$(op)";)
 	@$(foreach op,$(OPERATORS_TGT),echo "  make tune-$(op)-ref";)
 	@echo "  make tune-all           - Profile all operators with ncu"
+	@echo ""
+	@echo "Report targets:"
+	@echo "  make report             - Generate text reports from NCU profiles (Details page)"
 	@echo "=========================================="
 
 # Display detected GPU info
@@ -698,6 +701,80 @@ tune-all:
 	@echo "Profile reports available in: $(PROFILING_DIR)/"
 	@ls -lh $(PROFILING_DIR)/*.ncu-rep 2>/dev/null || true
 	@echo "=========================================="
+
+# ============================================================================
+# Report Generation Target - Extract Summary and Details from NCU reports
+# ============================================================================
+report:
+	@echo "=========================================="
+	@echo "Generating Reports from NCU Profiles"
+	@echo "=========================================="
+	@$(MKDIR) reports
+	@echo ""
+	@echo "Processing NCU report files..."
+	@NCU_FILES=$$(find $(PROFILING_DIR) -name "*.ncu-rep" -type f 2>/dev/null | sort); \
+	if [ -z "$$NCU_FILES" ]; then \
+		echo "  ⚠ No NCU report files found in $(PROFILING_DIR)/"; \
+		echo "  Please run 'make tune-all' first to generate profiles."; \
+		exit 1; \
+	fi; \
+	COUNT=0; \
+	for ncu_file in $$NCU_FILES; do \
+		base_name=$$(basename "$$ncu_file" .ncu-rep); \
+		report_file="reports/$${base_name}_report.txt"; \
+		echo "  Exporting: $$base_name"; \
+		/usr/local/cuda-12.8/bin/ncu --import "$$ncu_file" --page details > "$$report_file" 2>&1; \
+		if [ -s "$$report_file" ]; then \
+			echo "    ✓ $$report_file"; \
+		else \
+			echo "    ✗ Failed to generate report"; \
+			rm -f "$$report_file"; \
+		fi; \
+		COUNT=$$((COUNT + 1)); \
+	done; \
+	echo ""; \
+	echo "=========================================="
+	@echo "Report Generation Complete!"
+	@echo "=========================================="
+	@echo "Generated reports:"
+	@ls -lh reports/*.txt 2>/dev/null || echo "  No reports generated"
+	@echo "=========================================="
+
+# ============================================================================
+# Report Extraction Targets (Auto-generated from OPERATORS list)
+# ============================================================================
+
+# Generate report extraction targets for each operator
+$(addprefix report-,$(OPERATORS_TGT)): report-%:
+	@echo "=========================================="
+	@echo "Extracting Report for $(subst -,_,$*) Kernel"
+	@echo "=========================================="
+	@$(MKDIR) reports
+	@LATEST_REP=$$(ls -t $(PROFILING_DIR)/$(subst -,_,$*)_runonce_*_profile.ncu-rep 2>/dev/null | head -n1); \
+	if [ -z "$$LATEST_REP" ]; then \
+		echo "Error: No profiling report found for $(subst -,_,$*)"; \
+		echo "Please run 'make tune-$(subst _,-,$*)' first"; \
+		exit 1; \
+	fi; \
+	echo "Processing: $$LATEST_REP"; \
+	python3 scripts/extract_ncu_report.py "$$LATEST_REP" reports/ || exit 1; \
+	echo "=========================================="
+
+# Generate report extraction targets for reference kernels
+$(addsuffix -ref,$(addprefix report-,$(OPERATORS_TGT))): report-%-ref:
+	@echo "=========================================="
+	@echo "Extracting Report for $(subst -,_,$*) Reference Kernel"
+	@echo "=========================================="
+	@$(MKDIR) reports
+	@LATEST_REP=$$(ls -t $(PROFILING_DIR)/$(subst -,_,$*)_ref_*_profile.ncu-rep 2>/dev/null | head -n1); \
+	if [ -z "$$LATEST_REP" ]; then \
+		echo "Error: No reference profiling report found for $(subst -,_,$*)"; \
+		echo "Please run 'make tune-$(subst _,-,$*)-ref' first"; \
+		exit 1; \
+	fi; \
+	echo "Processing: $$LATEST_REP"; \
+	python3 scripts/extract_ncu_report.py "$$LATEST_REP" reports/ || exit 1; \
+	echo "=========================================="
 
 # ============================================================================
 # Test Target

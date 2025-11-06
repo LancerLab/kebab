@@ -44,10 +44,10 @@ using namespace nvcuda;
  */
 /**
  * @brief Naive GEMM kernel for RC mode: A row-major, B column-major
- * Matches cuBLAS behavior: C[m,n] = sum_k A[k,m] * B[k,n]
- * A is stored row-major: A[m,k] at A[m*K + k], but accessed as A[k,m] at A[k*M + m]
- * B is stored column-major: B[k,n] at B[k + n*K]
- * C is stored row-major: C[m,n] at C[m*N + n]
+ * Matches cuBLAS behavior: C[m,n] = sum_k A[m,k] * B[k,n]
+ * A is stored row-major (M×K): A[m,k] at A[m*K + k]
+ * B is stored column-major (K×N): B[k,n] at B[n*K + k]
+ * C is stored row-major (M×N): C[m,n] at C[m*N + n]
  */
 __global__ void gemm_naive_kernel_rc(
     const __half* __restrict__ A,
@@ -61,9 +61,9 @@ __global__ void gemm_naive_kernel_rc(
     if (m < M && n < N) {
         float sum = 0.0f;
         for (int k = 0; k < K; ++k) {
-            // A[k,m] at A[k*M + m] (treating row-major as column-major)
-            // B[k,n] at B[k + n*K] (column-major)
-            sum += __half2float(A[k * M + m]) * __half2float(B[k + n * K]);
+            // A[m,k] at A[m*K + k] (row-major)
+            // B[k,n] at B[n*K + k] (column-major: K×N matrix stored column-major)
+            sum += __half2float(A[m * K + k]) * __half2float(B[n * K + k]);
         }
         // C[m,n] at C[m*N + n] (row-major)
         C[m * N + n] = __float2half(sum);
@@ -72,10 +72,9 @@ __global__ void gemm_naive_kernel_rc(
 
 /**
  * @brief Naive GEMM kernel for CR mode: A column-major, B row-major
- * Matches cuBLAS behavior: C[m,n] = sum_k A[k,m] * B[n,k]
- * A is stored column-major: A[m,k] at A[m + k*M], accessed as A[k,m] at A[k*M + m]... wait, that's wrong
- * Actually: A[k,m] at A[k + m*K] in column-major where first dim is K
- * B is stored row-major: B[k,n] at B[k*N + n], but accessed as B[n,k] at B[n*K + k]
+ * Matches cuBLAS behavior: C[m,n] = sum_k A[m,k] * B[k,n]
+ * A is stored column-major: A[m,k] at A[m + k*M]  (note: column-major means A[m,k] is at A[m + k*M])
+ * B is stored row-major: B[k,n] at B[k*N + n]
  * C is stored row-major: C[m,n] at C[m*N + n]
  */
 __global__ void gemm_naive_kernel_cr(
@@ -90,9 +89,9 @@ __global__ void gemm_naive_kernel_cr(
     if (m < M && n < N) {
         float sum = 0.0f;
         for (int k = 0; k < K; ++k) {
-            // A[k,m] at A[k + m*K] (column-major, treating as K×M matrix)
-            // B[n,k] at B[n*K + k] (treating row-major as column-major)
-            sum += __half2float(A[k + m * K]) * __half2float(B[n * K + k]);
+            // A[m,k] at A[m + k*M] (column-major)
+            // B[k,n] at B[k*N + n] (row-major)
+            sum += __half2float(A[m + k * M]) * __half2float(B[k * N + n]);
         }
         // C[m,n] at C[m*N + n] (row-major)
         C[m * N + n] = __float2half(sum);
