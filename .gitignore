@@ -3,3 +3,4 @@ bench_results/
 *.md
 !README.md
 tmp/
+profiling/

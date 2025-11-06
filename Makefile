@@ -1,7 +1,7 @@
 # CuTeKernelLib Makefile
 # High-performance kernel library using NVIDIA CUTLASS CuTe
 
-.PHONY: all setup build clean help test
+.PHONY: all setup build clean help test gpu-info
 
 # ============================================================================
 # OS Detection
@@ -23,13 +23,56 @@ else
 endif
 
 # ============================================================================
+# Directories
+# ============================================================================
+BUILD_DIR := build
+SRC_DIR := src
+INCLUDE_DIR := include
+THIRD_PARTY_DIR := third_party
+CUTE_DIR := $(THIRD_PARTY_DIR)/cute
+BASELINES_DIR := baselines
+BENCHMARKS_DIR := benchmarks
+BENCH_RESULTS_DIR := bench_results
+PROFILING_DIR := profiling
+YAML_CPP_DIR := $(THIRD_PARTY_DIR)/yaml-cpp
+
+# ============================================================================
+# Operators (Define list for auto-generation of targets)
+# ============================================================================
+OPERATORS := elementwise_add gemm
+# Convert underscores to hyphens for target names
+OPERATORS_TGT := $(subst _,-,$(OPERATORS))
+
+# ============================================================================
+# Baselines
+# ============================================================================
+BASELINES := cuda_elementwise_add cuda_gemm
+
+# Build mode
+BUILD_MODE ?= release
+
+# ============================================================================
+# Conditional Environment Detection
+# ============================================================================
+# Only detect CUDA environment for targets that need it
+# This avoids expensive detection for simple targets like clean, help, etc.
+
+# List of targets that DON'T need CUDA detection
+SIMPLE_TARGETS := clean help setup
+
+# Check if we're running a simple target
+NEED_CUDA := yes
+ifneq ($(MAKECMDGOALS),)
+    ifeq ($(filter-out $(SIMPLE_TARGETS),$(MAKECMDGOALS)),)
+        NEED_CUDA := no
+    endif
+endif
+
+# ============================================================================
 # GPU Architecture Detection
 # ============================================================================
-# Allow manual override via environment variable
-ifdef CUDA_ARCH
-    # User specified CUDA_ARCH manually
-    $(info Using manually specified CUDA_ARCH: $(CUDA_ARCH))
-else
+ifeq ($(NEED_CUDA),yes)
+ifndef CUDA_ARCH
     # Detect GPU compute capability using nvidia-smi
     COMPUTE_CAP := $(shell nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n1 | tr -d '.')
     
@@ -73,21 +116,21 @@ else
             $(error GPU detection failed. Cannot proceed without valid CUDA_ARCH.)
         endif
     endif
+    
+    # Convert sm_90 to sm_90a for WGMMA support
+    ifeq ($(CUDA_ARCH),sm_90)
+        CUDA_ARCH := sm_90a
+        $(info Converting sm_90 to sm_90a for WGMMA support)
+    endif
 endif
-
-# Convert sm_90 to sm_90a for WGMMA support
-ifeq ($(CUDA_ARCH),sm_90)
-    CUDA_ARCH := sm_90a
-    $(info Converting sm_90 to sm_90a for WGMMA support)
 endif
 
 # ============================================================================
-# CUDA Toolkit Detection with Driver Compatibility
+# CUDA Toolkit Detection
 # ============================================================================
-# Allow manual override via environment variable
+ifeq ($(NEED_CUDA),yes)
 ifndef CUDA_PATH
     # Step 1: Detect driver-supported CUDA version
-    # Based on NVIDIA official compatibility matrix
     DRIVER_CUDA_VERSION := $(shell nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1 | \
         awk 'BEGIN{FS="."} { \
             if ($$1 >= 580) print "13.0"; \
@@ -108,12 +151,7 @@ ifndef CUDA_PATH
     AVAILABLE_CUDA_PATHS := $(wildcard /usr/local/cuda-* /opt/cuda-*)
     AVAILABLE_CUDA_PATHS += $(wildcard /usr/local/cuda)
     
-    # Step 3: Extract version numbers and find compatible versions
-    define extract_cuda_version
-        $(shell echo $(1) | sed -n 's|.*/cuda-\([0-9]\+\.[0-9]\+\).*|\1|p')
-    endef
-    
-    # Step 4: Find the best compatible CUDA version
+    # Step 3: Find the best compatible CUDA version
     BEST_CUDA_PATH := 
     BEST_CUDA_VERSION := 0.0
     
@@ -126,7 +164,7 @@ ifndef CUDA_PATH
         
         # Check each available CUDA installation
         $(foreach path,$(AVAILABLE_CUDA_PATHS), \
-            $(eval CUDA_VER := $(call extract_cuda_version,$(path))) \
+            $(eval CUDA_VER := $(shell echo $(path) | sed -n 's|.*/cuda-\([0-9]\+\.[0-9]\+\).*|\1|p')) \
             $(if $(CUDA_VER), \
                 $(eval CUDA_VER_NUM := $(shell echo $(CUDA_VER) | awk -F. '{printf "%d%02d", $$1, $$2}')) \
                 $(if $(shell [ $(CUDA_VER_NUM) -le $(DRIVER_VERSION_NUM) ] && [ $(CUDA_VER_NUM) -gt $(shell echo $(BEST_CUDA_VERSION) | awk -F. '{printf "%d%02d", $$1, $$2}') ] && echo yes), \
@@ -136,38 +174,10 @@ ifndef CUDA_PATH
             ) \
         )
         
-        # Special handling for /usr/local/cuda symlink
-        ifneq ($(wildcard /usr/local/cuda),)
-            SYMLINK_TARGET := $(shell readlink -f /usr/local/cuda 2>/dev/null)
-            ifneq ($(SYMLINK_TARGET),)
-                SYMLINK_VER := $(call extract_cuda_version,$(SYMLINK_TARGET))
-                ifneq ($(SYMLINK_VER),)
-                    SYMLINK_VER_NUM := $(shell echo $(SYMLINK_VER) | awk -F. '{printf "%d%02d", $$1, $$2}')
-                    ifeq ($(shell [ $(SYMLINK_VER_NUM) -le $(DRIVER_VERSION_NUM) ] && [ $(SYMLINK_VER_NUM) -gt $(shell echo $(BEST_CUDA_VERSION) | awk -F. '{printf "%d%02d", $$1, $$2}') ] && echo yes),yes)
-                        BEST_CUDA_PATH := /usr/local/cuda
-                        BEST_CUDA_VERSION := $(SYMLINK_VER)
-                    endif
-                endif
-            endif
-        endif
-        
         # Use the best compatible version
         ifneq ($(BEST_CUDA_PATH),)
             CUDA_PATH := $(BEST_CUDA_PATH)
             $(info Selected compatible CUDA toolkit: $(CUDA_PATH) (version $(BEST_CUDA_VERSION)))
-        else
-            $(warning ========================================)
-            $(warning CUDA Version Compatibility Issue!)
-            $(warning ========================================)
-            $(warning Driver supports CUDA $(DRIVER_CUDA_VERSION), but no compatible toolkit found.)
-            $(warning Available CUDA installations:)
-            $(foreach path,$(AVAILABLE_CUDA_PATHS),$(warning   $(path)))
-            $(warning )
-            $(warning Consider:)
-            $(warning   1. Installing CUDA $(DRIVER_CUDA_VERSION) or earlier)
-            $(warning   2. Upgrading your NVIDIA driver)
-            $(warning   3. Manually setting CUDA_PATH environment variable)
-            $(warning ========================================)
         endif
     endif
     
@@ -182,29 +192,31 @@ ifndef CUDA_PATH
             CUDA_PATH := $(firstword $(foreach path,$(CUDA_SEARCH_PATHS),$(wildcard $(path))))
         endif
     endif
+    
+    # If CUDA_PATH is still empty, show error
+    ifeq ($(CUDA_PATH),)
+        $(warning ========================================)
+        $(warning CUDA Toolkit Not Found!)
+        $(warning ========================================)
+        $(warning Could not locate CUDA installation.)
+        $(warning Please ensure CUDA toolkit is installed and either:)
+        $(warning   1. Add CUDA bin directory to PATH:)
+        $(warning      export PATH=/usr/local/cuda/bin:$$PATH)
+        $(warning   2. Set CUDA_PATH environment variable:)
+        $(warning      export CUDA_PATH=/usr/local/cuda)
+        $(warning )
+        $(warning Download CUDA from:)
+        $(warning   https://developer.nvidia.com/cuda-downloads)
+        $(warning ========================================)
+        $(error CUDA toolkit not found. Cannot proceed.)
+    endif
 endif
-
-# If CUDA_PATH is still empty, show error
-ifeq ($(CUDA_PATH),)
-    $(warning ========================================)
-    $(warning CUDA Toolkit Not Found!)
-    $(warning ========================================)
-    $(warning Could not locate CUDA installation.)
-    $(warning Please ensure CUDA toolkit is installed and either:)
-    $(warning   1. Add CUDA bin directory to PATH:)
-    $(warning      export PATH=/usr/local/cuda/bin:$$PATH)
-    $(warning   2. Set CUDA_PATH environment variable:)
-    $(warning      export CUDA_PATH=/usr/local/cuda)
-    $(warning )
-    $(warning Download CUDA from:)
-    $(warning   https://developer.nvidia.com/cuda-downloads)
-    $(warning ========================================)
-    $(error CUDA toolkit not found. Cannot proceed.)
 endif
 
 # ============================================================================
-# Compiler and Flags
+# Compiler and Flags (Only set when CUDA is needed)
 # ============================================================================
+ifeq ($(NEED_CUDA),yes)
 # Set CUDA binaries
 NVCC := $(CUDA_PATH)/bin/nvcc
 CXX := g++
@@ -223,8 +235,7 @@ NVCC_FLAGS := -std=c++17 \
               --expt-extended-lambda \
               -cudart shared
 
-# Build mode specific flags (will be set from config.yaml)
-BUILD_MODE ?= release
+# Build mode specific flags
 ifeq ($(BUILD_MODE),debug)
     NVCC_FLAGS += -g -G -O0 -lineinfo
     CXX_FLAGS := -g -O0
@@ -240,34 +251,13 @@ NVCC_FLAGS += -Xcompiler -fPIC
 ifeq ($(CUDA_ARCH),sm_90a)
     NVCC_FLAGS += -D__CUDA_ARCH_FEAT_SM90_ALL
 endif
+
 CUDA_INCLUDE := $(CUDA_PATH)/include
 CXX_FLAGS += -std=c++17 -fPIC -I./include -I$(YAML_CPP_DIR)/include -I$(CUDA_INCLUDE)
 
 # Linker flags
 LDFLAGS := -L$(YAML_CPP_DIR)/build -lyaml-cpp
-
-# ============================================================================
-# Directories
-# ============================================================================
-BUILD_DIR := build
-SRC_DIR := src
-INCLUDE_DIR := include
-THIRD_PARTY_DIR := third_party
-CUTE_DIR := $(THIRD_PARTY_DIR)/cute
-BASELINES_DIR := baselines
-BENCHMARKS_DIR := benchmarks
-BENCH_RESULTS_DIR := bench_results
-PROFILING_DIR := profiling
-
-# ============================================================================
-# Operators
-# ============================================================================
-OPERATORS := elementwise_add gemm
-
-# ============================================================================
-# Baselines
-# ============================================================================
-BASELINES := cuda_elementwise_add cuda_gemm
+endif
 
 # ============================================================================
 # Targets
@@ -281,39 +271,24 @@ help:
 	@echo "=========================================="
 	@echo "Detected Configuration:"
 	@echo "  OS:           $(OS)"
-	@echo "  CUDA_PATH:    $(CUDA_PATH)"
-	@echo "  NVCC:         $(NVCC)"
-	@echo "  CUDA_ARCH:    $(CUDA_ARCH)"
-	@echo "  BUILD_MODE:   $(BUILD_MODE)"
-	@if [ -n "$(NCU)" ]; then \
-		echo "  NCU:          $(NCU)"; \
-	else \
-		echo "  NCU:          Not found (profiling unavailable)"; \
-	fi
-	@if [ -n "$(NVIDIA_SMI)" ]; then \
-		echo "  NVIDIA_SMI:   $(NVIDIA_SMI)"; \
-	else \
-		echo "  NVIDIA_SMI:   Not found"; \
-	fi
 	@echo ""
 	@echo "Available targets:"
 	@echo "  make setup              - Install dependencies (CuTe, yaml-cpp)"
 	@echo "  make build              - Compile library and operators"
 	@echo "  make clean              - Remove build artifacts"
 	@echo "  make help               - Show this help message"
+	@echo "  make gpu-info           - Display GPU and CUDA information"
 	@echo ""
 	@echo "Test targets:"
-	@echo "  make test                   - Run all tests (uses bench-gemm with verification)"
+	@echo "  make test               - Run all tests (uses bench-gemm with verification)"
 	@echo ""
 	@echo "Benchmark targets (after build):"
-	@echo "  make bench-elementwise-add  - Benchmark element-wise add"
-	@echo "  make bench-gemm             - Benchmark GEMM"
-	@echo "  make bench-all              - Run all benchmarks and generate summary"
+	@$(foreach op,$(OPERATORS_TGT),echo "  make bench-$(op)";)
+	@echo "  make bench-all          - Run all benchmarks and generate summary"
 	@echo ""
 	@echo "Profiling targets (after build):"
-	@echo "  make tune-elementwise-add   - Profile element-wise add with ncu"
-	@echo "  make tune-gemm              - Profile GEMM with ncu"
-	@echo "  make tune-all               - Profile all operators with ncu"
+	@$(foreach op,$(OPERATORS_TGT),echo "  make tune-$(op)";)
+	@echo "  make tune-all           - Profile all operators with ncu"
 	@echo "=========================================="
 
 # Display detected GPU info
@@ -321,18 +296,33 @@ gpu-info:
 	@echo "=========================================="
 	@echo "GPU Information"
 	@echo "=========================================="
-	@if [ -n "$(NVIDIA_SMI)" ] && [ -x "$(NVIDIA_SMI)" ]; then \
-		$(NVIDIA_SMI) --query-gpu=name,compute_cap,driver_version,memory.total --format=csv,noheader; \
+	@NVIDIA_SMI=$$(which nvidia-smi 2>/dev/null); \
+	if [ -n "$$NVIDIA_SMI" ] && [ -x "$$NVIDIA_SMI" ]; then \
+		$$NVIDIA_SMI --query-gpu=name,compute_cap,driver_version,memory.total --format=csv,noheader; \
 	else \
 		echo "  ✗ nvidia-smi not found or not executable"; \
 		echo "  Please ensure NVIDIA drivers are installed"; \
 	fi
 	@echo ""
-	@echo "Detected CUDA Architecture: $(CUDA_ARCH)"
-	@echo "CUDA Path: $(CUDA_PATH)"
-	@echo "NVCC: $(NVCC)"
-	@if [ -n "$(NCU)" ]; then \
-		echo "NCU: $(NCU)"; \
+	@COMPUTE_CAP=$$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n1 | tr -d '.'); \
+	if [ -n "$$COMPUTE_CAP" ]; then \
+		echo "Detected CUDA Architecture: sm_$$COMPUTE_CAP"; \
+	else \
+		echo "CUDA Architecture: Not detected"; \
+	fi
+	@CUDA_PATH_DETECT=$$(which nvcc 2>/dev/null | sed 's|/bin/nvcc||'); \
+	if [ -z "$$CUDA_PATH_DETECT" ]; then \
+		CUDA_PATH_DETECT=$$(ls -d /usr/local/cuda /usr/local/cuda-* /opt/cuda 2>/dev/null | head -n1); \
+	fi; \
+	if [ -n "$$CUDA_PATH_DETECT" ]; then \
+		echo "CUDA Path: $$CUDA_PATH_DETECT"; \
+		echo "NVCC: $$CUDA_PATH_DETECT/bin/nvcc"; \
+	else \
+		echo "CUDA Path: Not found"; \
+	fi
+	@NCU=$$(which ncu 2>/dev/null || which nv-nsight-cu-cli 2>/dev/null); \
+	if [ -n "$$NCU" ]; then \
+		echo "NCU: $$NCU"; \
 	else \
 		echo "NCU: Not found"; \
 	fi
@@ -341,7 +331,6 @@ gpu-info:
 # ============================================================================
 # Setup Target - Install Dependencies
 # ============================================================================
-YAML_CPP_DIR := $(THIRD_PARTY_DIR)/yaml-cpp
 
 setup:
 	@echo "=========================================="
@@ -382,42 +371,40 @@ setup:
 		{ echo "  ⚠ Warning: Could not initialize submodules (may not be critical)"; }
 	@echo "  ✓ Submodules initialized"
 	@echo ""
-	@echo "[4/4] Installing yaml-cpp..."
-	@if [ -d "$(YAML_CPP_DIR)" ]; then \
-		echo "  ℹ yaml-cpp already exists at $(YAML_CPP_DIR)"; \
+	@echo "[4/4] Checking yaml-cpp installation..."
+	@if pkg-config --exists yaml-cpp 2>/dev/null; then \
+	echo "  ✓ yaml-cpp found via pkg-config"; \
+	pkg-config --modversion yaml-cpp | xargs -I {} echo "    Version: {}"; \
+	elif [ -f "/usr/include/yaml-cpp/yaml.h" ] || [ -f "/usr/local/include/yaml-cpp/yaml.h" ]; then \
+	echo "  ✓ yaml-cpp headers found in system"; \
 	else \
-		echo "  Cloning yaml-cpp repository..."; \
-		git clone --depth 1 --branch 0.8.0 https://github.com/jbeder/yaml-cpp.git $(YAML_CPP_DIR) || \
-		{ echo ""; \
-		  echo "  ✗ ERROR: Failed to clone yaml-cpp repository"; \
-		  echo ""; \
-		  echo "  Troubleshooting:"; \
-		  echo "    1. Check internet connection"; \
-		  echo "    2. Try manual clone:"; \
-		  echo "       git clone https://github.com/jbeder/yaml-cpp.git $(YAML_CPP_DIR)"; \
-		  echo ""; \
-		  exit 1; \
-		}; \
+	echo "  ✗ ERROR: yaml-cpp not found in system"; \
+	echo ""; \
+	echo "  Please install yaml-cpp development package:"; \
+	echo ""; \
+	echo "  Ubuntu/Debian:"; \
+	echo "    sudo apt-get install libyaml-cpp-dev"; \
+	echo ""; \
+	echo "  Fedora/RHEL:"; \
+	echo "    sudo dnf install yaml-cpp-devel"; \
+	echo ""; \
+	echo "  Arch Linux:"; \
+	echo "    sudo pacman -S yaml-cpp"; \
+	echo ""; \
+	echo "  macOS:"; \
+	echo "    brew install yaml-cpp"; \
+	echo ""; \
+	exit 1; \
 	fi
-	@echo "  Building yaml-cpp..."
-	@cd $(YAML_CPP_DIR) && \
-		$(MKDIR) build && \
-		cd build && \
-		cmake -DYAML_CPP_BUILD_TESTS=OFF -DYAML_CPP_BUILD_TOOLS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON .. && \
-		make -j$$(nproc) || \
-		{ echo "  ✗ ERROR: Failed to build yaml-cpp"; \
-		  echo "  Ensure cmake is installed: sudo apt-get install cmake"; \
-		  exit 1; \
-		}
-	@echo "  ✓ yaml-cpp installed and built"
+	@echo "  ✓ yaml-cpp check complete"
 	@echo ""
 	@echo "=========================================="
 	@echo "Setup complete!"
 	@echo "=========================================="
 	@echo ""
-	@echo "Dependencies installed:"
+	@echo "Dependencies:"
 	@echo "  - CuTe headers:  $(CUTE_DIR)/include"
-	@echo "  - yaml-cpp:      $(YAML_CPP_DIR)"
+	@echo "  - yaml-cpp:      System installation"
 	@echo ""
 	@echo "Next steps:"
 	@echo "  1. Run 'make build' to compile the library"
@@ -433,8 +420,10 @@ cmake-configure:
 	@echo "=========================================="
 	@echo "Configuring CMake build system..."
 	@echo "=========================================="
+	@echo "Using CUDA_ARCH: $(CUDA_ARCH)"
+	@echo "Using CUDA_PATH: $(CUDA_PATH)"
 	@$(MKDIR) $(BUILD_DIR)
-	@cd $(BUILD_DIR) && cmake -DCMAKE_BUILD_TYPE=$(shell echo $(BUILD_MODE) | sed 's/debug/Debug/;s/release/Release/') \
+	@cd $(BUILD_DIR) && cmake -DCMAKE_BUILD_TYPE=$$(echo $(BUILD_MODE) | sed 's/debug/Debug/;s/release/Release/') \
 		-DCUDA_ARCH=$(CUDA_ARCH) \
 		-DCUDA_PATH=$(CUDA_PATH) \
 		../kebab
@@ -448,22 +437,21 @@ cmake-build: cmake-configure
 	@echo "  ✓ Build complete"
 
 # ============================================================================
-# Benchmark Targets
+# Benchmark Targets (Auto-generated from OPERATORS list)
 # ============================================================================
 
-bench-elementwise-add: build
+# Define a template for benchmark targets
+define BENCH_TEMPLATE
+bench-$(1): build
 	@echo "=========================================="
-	@echo "Running Element-wise Add Benchmark"
+	@echo "Running $(subst -,_,$(1)) Benchmark"
 	@echo "=========================================="
-	@$(BUILD_DIR)/lib/benchmark/bench_elementwise_add
-	@echo "  ✓ Benchmark program compiled"
+	@$$(BUILD_DIR)/lib/benchmark/bench_$(subst -,_,$(1))
+	@echo "  ✓ Benchmark complete"
+endef
 
-bench-gemm: build
-	@echo "=========================================="
-	@echo "Running GEMM Benchmark"
-	@echo "=========================================="
-	@$(BUILD_DIR)/lib/benchmark/bench_gemm
-	@echo "  ✓ Benchmark program compiled"
+# Generate benchmark targets for each operator
+$(foreach op,$(OPERATORS_TGT),$(eval $(call BENCH_TEMPLATE,$(op))))
 
 # Benchmark all operators and generate summary report
 bench-all:
@@ -473,12 +461,11 @@ bench-all:
 	@$(MKDIR) $(BENCH_RESULTS_DIR)
 	@echo ""
 	@echo "Running benchmarks for all operators..."
-	@for op in $(OPERATORS); do \
+	@$(foreach op,$(OPERATORS_TGT), \
 		echo ""; \
-		echo "Benchmarking operator: $$op"; \
-		target=$$(echo $$op | tr '_' '-'); \
-		$(MAKE) bench-$$target || exit 1; \
-	done
+		echo "Benchmarking operator: $(op)"; \
+		$(MAKE) bench-$(op) || exit 1; \
+	)
 	@echo ""
 	@echo "Generating summary report..."
 	@if [ -f "scripts/generate_report.py" ]; then \
@@ -503,48 +490,47 @@ bench-all:
 	@echo "=========================================="
 
 # ============================================================================
-# Profiling Targets - Nsight Compute Integration
+# Profiling Targets (Auto-generated from OPERATORS list)
 # ============================================================================
 
-# Auto-detect Nsight Compute (ncu)
-NCU := $(shell which ncu 2>/dev/null)
-ifeq ($(NCU),)
-    NCU := $(shell which nv-nsight-cu-cli 2>/dev/null)
-endif
-ifeq ($(NCU),)
-    # Try to find ncu in CUDA installation
-    ifneq ($(CUDA_PATH),)
-        NCU_SEARCH_PATHS := $(CUDA_PATH)/bin/ncu \
-                           $(CUDA_PATH)/nsight-compute/ncu \
-                           $(CUDA_PATH)/../nsight-compute/ncu \
-                           /usr/local/cuda/bin/ncu \
-                           /opt/nvidia/nsight-compute/ncu
-        NCU := $(firstword $(foreach path,$(NCU_SEARCH_PATHS),$(wildcard $(path))))
-    endif
-endif
-
-# Auto-detect nvidia-smi for driver check
-NVIDIA_SMI := $(shell which nvidia-smi 2>/dev/null)
-ifeq ($(NVIDIA_SMI),)
-    NVIDIA_SMI_SEARCH_PATHS := /usr/bin/nvidia-smi \
-                               /usr/local/cuda/bin/nvidia-smi \
-                               $(CUDA_PATH)/bin/nvidia-smi
-    NVIDIA_SMI := $(firstword $(foreach path,$(NVIDIA_SMI_SEARCH_PATHS),$(wildcard $(path))))
-endif
-
-tune-elementwise-add: build
+# Define a template for profiling targets
+define TUNE_TEMPLATE
+tune-$(1): build
 	@echo "=========================================="
-	@echo "Profiling Element-wise Add with Nsight Compute"
+	@echo "Profiling $(subst -,_,$(1)) with Nsight Compute"
 	@echo "=========================================="
-	@if [ -z "$(NCU)" ] || [ ! -x "$(NCU)" ]; then \
+	@NCU=$$(which ncu 2>/dev/null || which nv-nsight-cu-cli 2>/dev/null); \
+	DRIVER_VER=$$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1 | cut -d. -f1); \
+	DRIVER_CUDA_VER=""; \
+	if [ -n "$$DRIVER_VER" ]; then \
+		if [ $$DRIVER_VER -ge 580 ]; then DRIVER_CUDA_VER="13.0"; \
+		elif [ $$DRIVER_VER -ge 570 ]; then DRIVER_CUDA_VER="12.8"; \
+		elif [ $$DRIVER_VER -ge 560 ]; then DRIVER_CUDA_VER="12.6"; \
+		elif [ $$DRIVER_VER -ge 550 ]; then DRIVER_CUDA_VER="12.4"; \
+		elif [ $$DRIVER_VER -ge 535 ]; then DRIVER_CUDA_VER="12.2"; \
+		elif [ $$DRIVER_VER -ge 525 ]; then DRIVER_CUDA_VER="12.0"; \
+		elif [ $$DRIVER_VER -ge 515 ]; then DRIVER_CUDA_VER="11.8"; \
+		elif [ $$DRIVER_VER -ge 510 ]; then DRIVER_CUDA_VER="11.6"; \
+		else DRIVER_CUDA_VER="11.0"; \
+		fi; \
+		echo "Driver supports CUDA $$DRIVER_CUDA_VER or earlier"; \
+	fi; \
+	if [ -z "$$NCU" ]; then \
+		echo "Searching for Nsight Compute installation..."; \
+		for base_path in /usr/local/cuda-* /opt/nvidia/nsight-compute /usr/local/cuda $(CUDA_PATH); do \
+			if [ -d "$$base_path" ]; then \
+				for ncu_path in $$base_path/bin/ncu $$base_path/nsight-compute*/ncu $$base_path/nsight-compute/ncu; do \
+					if [ -x "$$ncu_path" ]; then \
+						NCU="$$ncu_path"; \
+						break 2; \
+					fi; \
+				done; \
+			fi; \
+		done; \
+	fi; \
+	if [ -z "$$NCU" ] || [ ! -x "$$NCU" ]; then \
 		echo ""; \
 		echo "  ✗ ERROR: Nsight Compute (ncu) not found or not executable"; \
-		echo ""; \
-		echo "  Searched locations:"; \
-		echo "    - System PATH"; \
-		echo "    - $(CUDA_PATH)/bin/ncu"; \
-		echo "    - $(CUDA_PATH)/nsight-compute/ncu"; \
-		echo "    - /usr/local/cuda/bin/ncu"; \
 		echo ""; \
 		echo "  Nsight Compute is required for profiling."; \
 		echo "  Installation options:"; \
@@ -552,153 +538,114 @@ tune-elementwise-add: build
 		echo "    2. Download standalone from:"; \
 		echo "       https://developer.nvidia.com/nsight-compute"; \
 		echo ""; \
-		echo "  After installation, ensure ncu is in PATH:"; \
-		echo "    export PATH=/usr/local/cuda/bin:\$$PATH"; \
-		echo "  Or set NCU variable:"; \
-		echo "    make tune-elementwise-add NCU=/path/to/ncu"; \
+		echo "  After installation, ensure ncu is in PATH or install in standard location"; \
 		echo ""; \
 		exit 1; \
-	fi
-	@echo "Using NCU: $(NCU)"
-	@$(MKDIR) $(PROFILING_DIR)
-	@echo ""
-	@echo "Running ncu profiler (this may take several minutes)..."
-	@echo "Output will be saved to: $(PROFILING_DIR)/elementwise_add_profile.ncu-rep"
-	@echo ""
-	@$(NCU) --set full \
-		--export $(PROFILING_DIR)/elementwise_add_profile \
+	fi; \
+	NCU_VERSION=$$($$NCU --version 2>/dev/null | grep -oP 'Version \K[0-9]+\.[0-9]+' | head -n1); \
+	echo "Using NCU: $$NCU (Version $$NCU_VERSION)"; \
+	$(MKDIR) $(PROFILING_DIR); \
+	echo ""; \
+	echo "Running ncu profiler (this may take several minutes)..."; \
+	echo "Output will be saved to: $(PROFILING_DIR)/$(subst -,_,$(1))_profile.ncu-rep"; \
+	echo ""; \
+	$$NCU --set full \
+		--export $(PROFILING_DIR)/$(subst -,_,$(1))_profile \
 		--force-overwrite \
 		--target-processes all \
-		$(BUILD_DIR)/bench_elementwise_add || \
+		$(BUILD_DIR)/lib/benchmark/bench_$(subst -,_,$(1)) || \
 		{ echo ""; \
 		  echo "  ⚠ Warning: Profiling completed with errors (may be due to driver compatibility)"; \
 		  echo "  Profile data was still collected and saved."; \
 		  echo ""; \
-		}
-	@echo ""
-	@echo "Generating human-readable summary..."
-	@if [ -f "$(PROFILING_DIR)/elementwise_add_profile.ncu-rep" ]; then \
-		$(NCU) --import $(PROFILING_DIR)/elementwise_add_profile.ncu-rep \
-			--page raw \
-			--csv > $(PROFILING_DIR)/elementwise_add_summary.txt 2>&1 || \
-		$(NCU) --import $(PROFILING_DIR)/elementwise_add_profile.ncu-rep \
-			> $(PROFILING_DIR)/elementwise_add_summary.txt 2>&1 || \
-		echo "Summary generation skipped (ncu-rep file may be incomplete)"; \
-	else \
-		echo "  ⚠ Warning: Profile report not found, skipping summary generation"; \
-	fi
-	@echo ""
-	@echo "=========================================="
-	@echo "Profiling Complete!"
-	@echo "=========================================="
-	@if [ -f "$(PROFILING_DIR)/elementwise_add_profile.ncu-rep" ]; then \
+		}; \
+	echo ""; \
+	echo "=========================================="; \
+	echo "Profiling Complete!"; \
+	echo "=========================================="; \
+	if [ -f "$(PROFILING_DIR)/$(subst -,_,$(1))_profile.ncu-rep" ]; then \
 		echo "Results saved to:"; \
-		echo "  - NCU Report:  $(PROFILING_DIR)/elementwise_add_profile.ncu-rep"; \
-		if [ -f "$(PROFILING_DIR)/elementwise_add_summary.txt" ]; then \
-			echo "  - Summary:     $(PROFILING_DIR)/elementwise_add_summary.txt"; \
-		fi; \
+		echo "  - NCU Report:  $(PROFILING_DIR)/$(subst -,_,$(1))_profile.ncu-rep"; \
 		echo ""; \
 		echo "To view detailed report in Nsight Compute GUI:"; \
-		echo "  ncu-ui $(PROFILING_DIR)/elementwise_add_profile.ncu-rep"; \
+		echo "  ncu-ui $(PROFILING_DIR)/$(subst -,_,$(1))_profile.ncu-rep"; \
 	else \
 		echo "  ✗ Profiling failed - no report generated"; \
-	fi
-	@echo "=========================================="
+	fi; \
+	echo "=========================================="
+endef
 
-tune-gemm: build
+# Generate profiling targets for each operator
+$(addprefix tune-,$(OPERATORS_TGT)): tune-%: build
 	@echo "=========================================="
-	@echo "Profiling GEMM with Nsight Compute"
+	@echo "Profiling $(subst -,_,$*) with Nsight Compute"
 	@echo "=========================================="
-	@if [ -z "$(NCU)" ] || [ ! -x "$(NCU)" ]; then \
+	@NCU=$$(which ncu 2>/dev/null || which nv-nsight-cu-cli 2>/dev/null); \
+	if [ -z "$$NCU" ]; then \
+		echo "Searching for Nsight Compute installation..."; \
+		for base_path in /usr/local/cuda-* /opt/nvidia/nsight-compute /usr/local/cuda $(CUDA_PATH); do \
+			if [ -d "$$base_path" ]; then \
+				for ncu_path in $$base_path/bin/ncu $$base_path/nsight-compute*/ncu $$base_path/nsight-compute/ncu; do \
+					if [ -x "$$ncu_path" ]; then \
+						NCU="$$ncu_path"; \
+						break 2; \
+					fi; \
+				done; \
+			fi; \
+		done; \
+	fi; \
+	if [ -z "$$NCU" ] || [ ! -x "$$NCU" ]; then \
 		echo ""; \
-		echo "  ✗ ERROR: Nsight Compute (ncu) not found or not executable"; \
+		echo "  ✗ ERROR: Nsight Compute (ncu) not found"; \
 		echo ""; \
-		echo "  Searched locations:"; \
-		echo "    - System PATH"; \
-		echo "    - $(CUDA_PATH)/bin/ncu"; \
-		echo "    - $(CUDA_PATH)/nsight-compute/ncu"; \
-		echo "    - /usr/local/cuda/bin/ncu"; \
-		echo ""; \
-		echo "  Nsight Compute is required for profiling."; \
-		echo "  Installation options:"; \
-		echo "    1. Install with CUDA toolkit (recommended)"; \
-		echo "    2. Download standalone from:"; \
-		echo "       https://developer.nvidia.com/nsight-compute"; \
-		echo ""; \
-		echo "  After installation, ensure ncu is in PATH:"; \
-		echo "    export PATH=/usr/local/cuda/bin:\$$PATH"; \
-		echo "  Or set NCU variable:"; \
-		echo "    make tune-gemm NCU=/path/to/ncu"; \
+		echo "  Please install Nsight Compute:"; \
+		echo "    https://developer.nvidia.com/nsight-compute"; \
 		echo ""; \
 		exit 1; \
-	fi
-	@echo "Using NCU: $(NCU)"
-	@$(MKDIR) $(PROFILING_DIR)
-	@echo ""
-	@echo "Running ncu profiler (this may take several minutes)..."
-	@echo "Output will be saved to: $(PROFILING_DIR)/gemm_profile.ncu-rep"
-	@echo ""
-	@$(NCU) --set full \
-		--section LaunchStats \
-		--section Occupancy \
-		--section SpeedOfLight \
-		--section MemoryWorkloadAnalysis \
-		--section ComputeWorkloadAnalysis \
-		--export $(PROFILING_DIR)/gemm_profile \
+	fi; \
+	NCU_VERSION=$$($$NCU --version 2>/dev/null | grep -oP 'Version \K[0-9]+\.[0-9]+' | head -n1); \
+	echo "Using NCU: $$NCU (Version $$NCU_VERSION)"; \
+	$(MKDIR) $(PROFILING_DIR); \
+	TIMESTAMP=$$(date +%Y%m%d_%H%M%S); \
+	PROFILE_NAME="$(subst -,_,$*)_$${TIMESTAMP}_profile"; \
+	echo ""; \
+	echo "Running ncu profiler (this may take several minutes)..."; \
+	echo "Output will be saved to: $(PROFILING_DIR)/$${PROFILE_NAME}.ncu-rep"; \
+	echo ""; \
+	$$NCU --set full \
+		--export $(PROFILING_DIR)/$${PROFILE_NAME} \
 		--force-overwrite \
 		--target-processes all \
-		--kernel-name regex:.*gemm.* \
-		$(BUILD_DIR)/bench_gemm || \
-	{ echo ""; \
-	  echo "  ⚠ Warning: Profiling completed with errors (may be due to driver compatibility)"; \
-	  echo "  Profile data was still collected and saved."; \
-	  echo ""; \
-	}
-	@echo ""
-	@echo "Generating human-readable summary..."
-	@if [ -f "$(PROFILING_DIR)/gemm_profile.ncu-rep" ]; then \
-		echo "Generating detailed report with launch statistics and occupancy..." && \
-		$(NCU) --import $(PROFILING_DIR)/gemm_profile.ncu-rep \
-			> $(PROFILING_DIR)/gemm_summary.txt 2>&1 && \
-		echo "Summary generation completed"; \
-	else \
-		echo "  ⚠ Warning: Profile report not found, skipping summary generation"; \
-	fi
-	@echo ""
-	@echo "=========================================="
-	@echo "Profiling Complete!"
-	@echo "=========================================="
-	@if [ -f "$(PROFILING_DIR)/gemm_profile.ncu-rep" ]; then \
+		$(BUILD_DIR)/lib/benchmark/bench_$(subst -,_,$*) || \
+		{ echo ""; \
+		  echo "  ⚠ Warning: Profiling completed with errors"; \
+		  echo "  Profile data may still be available."; \
+		  echo ""; \
+		}; \
+	echo ""; \
+	echo "=========================================="; \
+	echo "Profiling Complete!"; \
+	echo "=========================================="; \
+	if [ -f "$(PROFILING_DIR)/$${PROFILE_NAME}.ncu-rep" ]; then \
 		echo "Results saved to:"; \
-		echo "  - NCU Report:     $(PROFILING_DIR)/gemm_profile.ncu-rep"; \
-		if [ -f "$(PROFILING_DIR)/gemm_summary.txt" ]; then \
-			echo "  - Summary:        $(PROFILING_DIR)/gemm_summary.txt"; \
-			echo ""; \
-			echo "Quick preview of launch statistics:"; \
-			grep -E "(Block Size|Grid Size|Registers Per Thread|Theoretical Occupancy|Achieved Occupancy)" \
-				$(PROFILING_DIR)/gemm_summary.txt | head -10 || true; \
-		fi; \
-		echo ""; \
-		echo "To view full report:"; \
-		echo "  cat $(PROFILING_DIR)/gemm_summary.txt"; \
+		echo "  - NCU Report:  $(PROFILING_DIR)/$${PROFILE_NAME}.ncu-rep"; \
 		echo ""; \
 		echo "To view in Nsight Compute GUI:"; \
-		echo "  ncu-ui $(PROFILING_DIR)/gemm_profile.ncu-rep"; \
+		echo "  ncu-ui $(PROFILING_DIR)/$${PROFILE_NAME}.ncu-rep"; \
 	else \
 		echo "  ✗ Profiling failed - no report generated"; \
-	fi
-	@echo "=========================================="
+	fi; \
+	echo "=========================================="
 
 tune-all:
 	@echo "=========================================="
 	@echo "Profiling All Operators"
 	@echo "=========================================="
-	@for op in $(OPERATORS); do \
+	@$(foreach op,$(OPERATORS_TGT), \
 		echo ""; \
-		echo "Profiling operator: $$op"; \
-		target=$$(echo $$op | tr '_' '-'); \
-		$(MAKE) tune-$$target || exit 1; \
-	done
+		echo "Profiling operator: $(op)"; \
+		$(MAKE) tune-$(op) || exit 1; \
+	)
 	@echo ""
 	@echo "=========================================="
 	@echo "All Operators Profiled Successfully!"
@@ -707,11 +654,18 @@ tune-all:
 	@ls -lh $(PROFILING_DIR)/*.ncu-rep 2>/dev/null || true
 	@echo "=========================================="
 
+# ============================================================================
+# Test Target
+# ============================================================================
+test: bench-gemm
+
+# ============================================================================
+# Clean Target
+# ============================================================================
 clean:
 	@echo "Cleaning build artifacts..."
-	$(RM) $(BUILD_DIR)
-	$(RM) $(BENCH_RESULTS_DIR)/*.csv
-	$(RM) $(PROFILING_DIR)/*.ncu-rep
-	$(RM) $(PROFILING_DIR)/*.txt
+	@$(RM) $(BUILD_DIR)
+	@$(RM) $(BENCH_RESULTS_DIR)/*.csv
+	@$(RM) $(PROFILING_DIR)/*.ncu-rep
+	@$(RM) $(PROFILING_DIR)/*.txt
 	@echo "Clean complete."
-
