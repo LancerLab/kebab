@@ -17,19 +17,6 @@
 namespace kebab {
 namespace cute {
 
-// Forward declare WGMMA implementations
-// Version 1: WGMMA without TMA
-void gemm_wgmma_fp16_dispatch(const void* A, const void* B, void* C,
-                              int M, int N, int K, 
-                              char lhs_format, char rhs_format,
-                              cudaStream_t stream);
-
-// Version 2: WGMMA with TMA (future)
-void gemm_wgmma_tma_fp16_dispatch(const void* A, const void* B, void* C,
-                                  int M, int N, int K, 
-                                  char lhs_format, char rhs_format,
-                                  cudaStream_t stream);
-
 /**
  * @brief Conversion kernels for FP32 <-> FP16
  */
@@ -95,12 +82,12 @@ void gemm<float>(const float* A, const float* B, float* C,
     // Version dispatch
     switch (version) {
         case 1:
-            // Version 1: WGMMA without TMA
-            gemm_wgmma_fp16_dispatch(d_A_fp16, d_B_fp16, d_C_fp16, M, N, K, lhs_format, rhs_format, stream);
+            // Version 1: WGMMA without TMA with configurable tile sizes
+            gemm_wgmma_fp16(d_A_fp16, d_B_fp16, d_C_fp16, M, N, K, lhs_format, rhs_format, stream);
             break;
         case 2:
-            // Version 2: WGMMA with TMA
-            gemm_wgmma_tma_fp16_dispatch(d_A_fp16, d_B_fp16, d_C_fp16, M, N, K, lhs_format, rhs_format, stream);
+            // Version 2: WGMMA with TMA with configurable tile sizes
+            gemm_wgmma_tma_fp16(d_A_fp16, d_B_fp16, d_C_fp16, M, N, K, lhs_format, rhs_format, stream);
             break;
         default:
             fprintf(stderr, "ERROR: Unsupported CuTe version %d for float\n", version);
@@ -146,48 +133,18 @@ void gemm<__half>(const __half* A, const __half* B, __half* C,
     // Version dispatch
     switch (version) {
         case 1:
-            // Version 1: WGMMA without TMA
-            gemm_wgmma_fp16_dispatch(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            // Version 1: WGMMA without TMA with configurable tile sizes
+            gemm_wgmma_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
             break;
         case 2:
-            // Version 2: WGMMA with TMA
-            gemm_wgmma_tma_fp16_dispatch(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            // Version 2: WGMMA with TMA with configurable tile sizes
+            gemm_wgmma_tma_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
             break;
         default:
             fprintf(stderr, "ERROR: Unsupported CuTe version %d for half\n", version);
             fprintf(stderr, "       Available versions: 1 (WGMMA without TMA), 2 (WGMMA with TMA)\n");
             exit(EXIT_FAILURE);
     }
-}
-
-/**
- * @brief Scaled GEMM - not yet implemented
- */
-template <>
-void gemm_scaled<float>(const float* A, const float* B, float* C, 
-                        int M, int N, int K, float alpha, float beta, 
-                        const char* opmode, int version, cudaStream_t stream) {
-    if (alpha != 1.0f || beta != 0.0f) {
-        fprintf(stderr, "ERROR: Scaled GEMM not yet implemented\n");
-        fprintf(stderr, "       Only alpha=1.0, beta=0.0 supported\n");
-        exit(EXIT_FAILURE);
-    }
-    gemm<float>(A, B, C, M, N, K, opmode, version, stream);
-}
-
-template <>
-void gemm_scaled<__half>(const __half* A, const __half* B, __half* C, 
-                         int M, int N, int K, __half alpha, __half beta, 
-                         const char* opmode, int version, cudaStream_t stream) {
-    float alpha_f = __half2float(alpha);
-    float beta_f = __half2float(beta);
-    
-    if (alpha_f != 1.0f || beta_f != 0.0f) {
-        fprintf(stderr, "ERROR: Scaled GEMM not yet implemented\n");
-        fprintf(stderr, "       Only alpha=1.0, beta=0.0 supported\n");
-        exit(EXIT_FAILURE);
-    }
-    gemm<__half>(A, B, C, M, N, K, opmode, version, stream);
 }
 
 } // namespace cute

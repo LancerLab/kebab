@@ -9,6 +9,7 @@
  */
 
 #include "kebab/cute/gemm.h"
+#include "kebab/config/config_parser.h"
 
 #include <cute/tensor.hpp>
 #include "cutlass/cluster_launch.hpp"
@@ -203,7 +204,8 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
 
 // Setup params for a NT GEMM
 template <class TA, class TB, class TC,
-          class Alpha, class Beta>
+          class Alpha, class Beta,
+          int BLK_M = 128, int BLK_N = 128, int BLK_K = 64>
 void
 gemm_nt(int m, int n, int k,
         Alpha alpha,
@@ -224,10 +226,10 @@ gemm_nt(int m, int n, int k,
   auto dB = make_stride(Int<1>{}, ldB);                      // (dN, dK)
   auto dC = make_stride(Int<1>{}, ldC);                      // (dM, dN)
 
-  // Define CTA tile sizes (static)
-  auto bM = Int<128>{};
-  auto bN = Int<128>{};
-  auto bK = Int< 64>{};
+  // Define CTA tile sizes (static) - now configurable via template parameters
+  auto bM = Int<BLK_M>{};
+  auto bN = Int<BLK_N>{};
+  auto bK = Int<BLK_K>{};
   auto cta_tiler = make_shape(bM, bN, bK);                   // (BLK_M, BLK_N, BLK_K)
   auto bP = Int<3>{};  // Pipeline
 
@@ -283,7 +285,8 @@ gemm_nt(int m, int n, int k,
 
 // Setup params for a NN GEMM (A: row-major, B: row-major)
 template <class TA, class TB, class TC,
-          class Alpha, class Beta>
+          class Alpha, class Beta,
+          int BLK_M = 128, int BLK_N = 128, int BLK_K = 64>
 void
 gemm_nn(int m, int n, int k,
         Alpha alpha,
@@ -304,10 +307,10 @@ gemm_nn(int m, int n, int k,
   auto dB = make_stride(ldB, Int<1>{});                      // (dK, dN) - B row-major: B[k,n] = B[k*N + n]
   auto dC = make_stride(Int<1>{}, ldC);                      // (dM, dN)
 
-  // Define CTA tile sizes (static)
-  auto bM = Int<128>{};
-  auto bN = Int<128>{};
-  auto bK = Int< 64>{};
+  // Define CTA tile sizes (static) - now configurable via template parameters
+  auto bM = Int<BLK_M>{};
+  auto bN = Int<BLK_N>{};
+  auto bK = Int<BLK_K>{};
   auto cta_tiler = make_shape(bM, bN, bK);                   // (BLK_M, BLK_N, BLK_K)
   auto bP = Int<3>{};  // Pipeline
 
@@ -363,7 +366,8 @@ gemm_nn(int m, int n, int k,
 
 // Setup params for a TT GEMM (A^T: col-major, B^T: col-major)
 template <class TA, class TB, class TC,
-          class Alpha, class Beta>
+          class Alpha, class Beta,
+          int BLK_M = 128, int BLK_N = 128, int BLK_K = 64>
 void
 gemm_tt(int m, int n, int k,
         Alpha alpha,
@@ -384,10 +388,10 @@ gemm_tt(int m, int n, int k,
   auto dB = make_stride(Int<1>{}, ldB);                      // (dK, dN) - B^T col-major
   auto dC = make_stride(Int<1>{}, ldC);                      // (dM, dN)
 
-  // Define CTA tile sizes (static)
-  auto bM = Int<128>{};
-  auto bN = Int<128>{};
-  auto bK = Int< 64>{};
+  // Define CTA tile sizes (static) - now configurable via template parameters
+  auto bM = Int<BLK_M>{};
+  auto bN = Int<BLK_N>{};
+  auto bK = Int<BLK_K>{};
   auto cta_tiler = make_shape(bM, bN, bK);                   // (BLK_M, BLK_N, BLK_K)
   auto bP = Int<3>{};  // Pipeline
 
@@ -443,7 +447,8 @@ gemm_tt(int m, int n, int k,
 
 // Setup params for a TN GEMM
 template <class TA, class TB, class TC,
-          class Alpha, class Beta>
+          class Alpha, class Beta,
+          int BLK_M = 128, int BLK_N = 128, int BLK_K = 64>
 void
 gemm_tn(int m, int n, int k,
         Alpha alpha,
@@ -464,10 +469,10 @@ gemm_tn(int m, int n, int k,
   auto dB = make_stride(ldB, Int<1>{});                      // (dN, dK)
   auto dC = make_stride(Int<1>{}, ldC);                      // (dM, dN)
 
-  // Define CTA tile sizes (static)
-  auto bM = Int<128>{};
-  auto bN = Int<128>{};
-  auto bK = Int< 64>{};
+  // Define CTA tile sizes (static) - now configurable via template parameters
+  auto bM = Int<BLK_M>{};
+  auto bN = Int<BLK_N>{};
+  auto bK = Int<BLK_K>{};
   auto cta_tiler = make_shape(bM, bN, bK);                   // (BLK_M, BLK_N, BLK_K)
   auto bP = Int<3>{};  // Pipeline
 
@@ -547,11 +552,15 @@ gemm_tn(int m, int n, int k,
  * @param K Number of columns in A and rows in B
  * @param lhs_mode "N" for normal A, "T" for transpose A
  * @param rhs_mode "N" for normal B, "T" for transpose B
+ * @param tile_M Tile size for M dimension
+ * @param tile_N Tile size for N dimension
+ * @param tile_K Tile size for K dimension
  * @param stream CUDA stream
  */
 void gemm_wgmma_fp16_dispatch(const void* A_ptr, const void* B_ptr, void* C_ptr,
                               int M, int N, int K, 
                               char lhs_format, char rhs_format,
+                              int tile_M, int tile_N, int tile_K,
                               cudaStream_t stream)
 {
     const half_t* A = reinterpret_cast<const half_t*>(A_ptr);
@@ -560,16 +569,6 @@ void gemm_wgmma_fp16_dispatch(const void* A_ptr, const void* B_ptr, void* C_ptr,
     
     float alpha = 1.0f;
     float beta = 0.0f;
-    
-    // ============================================================================
-    // WORKING CODE (verified correct for RC and CR modes)
-    // ============================================================================
-    // if (lhs_format == 'R' && rhs_format == 'C') {
-    //     gemm_tn(N, M, K, alpha, B, N, A, K, beta, C, M, stream);
-    // } else if (lhs_format == 'C' && rhs_format == 'R') {
-    //     gemm_nt(N, M, K, alpha, B, N, A, K, beta, C, M, stream);
-    // }
-    // ============================================================================
     
     // CORRECTED IMPLEMENTATION: Align with cuBLAS naming conventions
     // cuBLAS: opA refers to operation on A, opB refers to operation on B
@@ -582,16 +581,53 @@ void gemm_wgmma_fp16_dispatch(const void* A_ptr, const void* B_ptr, void* C_ptr,
     // - When cuBLAS uses opA=T, opB=N: C^T = B × A^T, we should call gemm_nt (A^T × B after swap)
     // - When cuBLAS uses opA=N, opB=T: C^T = B^T × A, we should call gemm_tn (A × B^T after swap)
     
+    // Dispatch based on tile sizes and storage format
     if (lhs_format == 'R' && rhs_format == 'C') {
         // RC: cuBLAS uses opA=T, opB=N => C^T = B × A^T
         // CuTe: gemm_nt computes C^T = A^T × B with row-major A,B
         // After argument swap: gemm_nt(N, M, K, B, ldB, A, ldA, C, ldC)
-        gemm_nt(N, M, K, alpha, B, K, A, K, beta, C, M, stream);
+        
+        // Dispatch based on tile configuration
+        if (tile_M == 64 && tile_N == 64 && tile_K == 32) {
+            gemm_nt<half_t, half_t, half_t, float, float, 64, 64, 32>(
+                N, M, K, alpha, B, K, A, K, beta, C, M, stream);
+        } else if (tile_M == 128 && tile_N == 128 && tile_K == 64) {
+            gemm_nt<half_t, half_t, half_t, float, float, 128, 128, 64>(
+                N, M, K, alpha, B, K, A, K, beta, C, M, stream);
+        } else if (tile_M == 256 && tile_N == 128 && tile_K == 64) {
+            gemm_nt<half_t, half_t, half_t, float, float, 256, 128, 64>(
+                N, M, K, alpha, B, K, A, K, beta, C, M, stream);
+        } else if (tile_M == 128 && tile_N == 256 && tile_K == 64) {
+            gemm_nt<half_t, half_t, half_t, float, float, 128, 256, 64>(
+                N, M, K, alpha, B, K, A, K, beta, C, M, stream);
+        } else {
+            // Default fallback
+            gemm_nt<half_t, half_t, half_t, float, float, 128, 128, 64>(
+                N, M, K, alpha, B, K, A, K, beta, C, M, stream);
+        }
     } else if (lhs_format == 'C' && rhs_format == 'R') {
         // CR: cuBLAS uses opA=N, opB=T => C^T = B^T × A
         // CuTe: gemm_tn computes C^T = A × B^T with row-major A,B
         // After argument swap: gemm_tn(N, M, K, B, ldB, A, ldA, C, ldC)
-        gemm_tn(N, M, K, alpha, B, N, A, M, beta, C, M, stream);
+        
+        // Dispatch based on tile configuration
+        // Note: gemm_tn has constraints due to GMMA layout requirements
+        if (tile_M == 128 && tile_N == 128 && tile_K == 64) {
+            gemm_tn<half_t, half_t, half_t, float, float, 128, 128, 64>(
+                N, M, K, alpha, B, N, A, M, beta, C, M, stream);
+        } else if (tile_M == 256 && tile_N == 128 && tile_K == 64) {
+            gemm_tn<half_t, half_t, half_t, float, float, 256, 128, 64>(
+                N, M, K, alpha, B, N, A, M, beta, C, M, stream);
+        } else if (tile_M == 128 && tile_N == 256 && tile_K == 64) {
+            gemm_tn<half_t, half_t, half_t, float, float, 128, 256, 64>(
+                N, M, K, alpha, B, N, A, M, beta, C, M, stream);
+        } else {
+            // Unsupported tile size for gemm_tn, fall back to default
+            fprintf(stderr, "Warning: Tile size [%d,%d,%d] not supported by gemm_tn due to GMMA constraints, using default [128,128,64]\n", 
+                    tile_M, tile_N, tile_K);
+            gemm_tn<half_t, half_t, half_t, float, float, 128, 128, 64>(
+                N, M, K, alpha, B, N, A, M, beta, C, M, stream);
+        }
     } else {
         fprintf(stderr, "ERROR: Invalid storage format combination: lhs=%c, rhs=%c\n", 
                 lhs_format, rhs_format);
@@ -599,21 +635,51 @@ void gemm_wgmma_fp16_dispatch(const void* A_ptr, const void* B_ptr, void* C_ptr,
 }
 
 /**
- * @brief Individual mode wrappers for backward compatibility and testing
- */
-void gemm_wgmma_fp16_rr(const void* A_ptr, const void* B_ptr, void* C_ptr,
-                        int M, int N, int K, cudaStream_t stream)
-{
-    gemm_wgmma_fp16_dispatch(A_ptr, B_ptr, C_ptr, M, N, K, 'R', 'R', stream);
-}
-
-/**
- * @brief Default WGMMA-based GEMM for FP16 (uses RR mode for standard row-major × row-major)
+ * @brief WGMMA-based GEMM for FP16 with configurable tile sizes
+ * 
+ * @param A_ptr Input matrix A
+ * @param B_ptr Input matrix B
+ * @param C_ptr Output matrix C
+ * @param M Number of rows in A and C
+ * @param N Number of columns in B and C
+ * @param K Number of columns in A and rows in B
+ * @param lhs_format Storage format for A ('R' for row-major, 'C' for column-major)
+ * @param rhs_format Storage format for B ('R' for row-major, 'C' for column-major)
+ * @param stream CUDA stream
  */
 void gemm_wgmma_fp16(const void* A_ptr, const void* B_ptr, void* C_ptr,
-                     int M, int N, int K, cudaStream_t stream)
+                     int M, int N, int K, 
+                     char lhs_format, char rhs_format,
+                     cudaStream_t stream)
 {
-    gemm_wgmma_fp16_rr(A_ptr, B_ptr, C_ptr, M, N, K, stream);
+    try {
+        // Get configuration instance
+        auto& config = kebab::config::ConfigParser::getInstance();
+        
+        // Get tile sizes from configuration
+        auto tile_sizes = config.getOperatorTileSizes("gemm");
+        
+        int tile_M = 128, tile_N = 128, tile_K = 64; // Default values
+        
+        if (tile_sizes.size() >= 3) {
+            tile_M = tile_sizes[0];
+            tile_N = tile_sizes[1];
+            tile_K = tile_sizes[2];
+        }
+        
+        // Call dispatch function with configured tile sizes
+        gemm_wgmma_fp16_dispatch(A_ptr, B_ptr, C_ptr, M, N, K, 
+                                lhs_format, rhs_format, 
+                                tile_M, tile_N, tile_K, stream);
+    } catch (const std::exception& e) {
+        // Fallback to default tile sizes if config loading fails
+        fprintf(stderr, "Warning: Failed to load tile sizes from config: %s\n", e.what());
+        fprintf(stderr, "Using default tile sizes: 128x128x64\n");
+        gemm_wgmma_fp16_dispatch(A_ptr, B_ptr, C_ptr, M, N, K, 
+                                lhs_format, rhs_format, 
+                                128, 128, 64, stream);
+    }
 }
+
 } // namespace cute
 } // namespace kebab

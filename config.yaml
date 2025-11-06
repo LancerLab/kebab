@@ -60,7 +60,7 @@ operators:
     # cute version 1: WGMMA without TMA
     # cute version 2: WGMMA with TMA
     # cute version 3: optimized tile sizes (future)
-    version: 2
+    version: 1
     # Initialization method for matrices A and B
     # Format: <A_init>-<B_init>
     # Options: one, rand, range, row, col
@@ -79,8 +79,13 @@ operators:
     modes: [RC, CR]
     # Precision: float32, float16
     precisions: [float16]
-    # Tile sizes (for tuning)
-    tile_sizes: [16, 32, 16]
+    # Tile sizes (for tuning): [M, N, K]
+    # Supported configurations:
+    #   [64, 64, 32]   - Small matrices, lower occupancy
+    #   [128, 128, 64] - Default, balanced (current hardcoded)
+    #   [256, 128, 64] - Large M dimension
+    #   [128, 256, 64] - Large N dimension
+    tile_sizes: [128, 128, 64]
     verbose: false
     
   fft:

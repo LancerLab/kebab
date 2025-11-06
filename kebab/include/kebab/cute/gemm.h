@@ -64,26 +64,6 @@ template<typename T>
 void gemm(const T* A, const T* B, T* C, int M, int N, int K, const char* opmode = "default", int version = 1, cudaStream_t stream = 0);
 
 /**
- * @brief GEMM with alpha and beta scaling: C = alpha * A * B + beta * C
- * 
- * @tparam T Data type (float or half)
- * @param A Input matrix A (M x K)
- * @param B Input matrix B (K x N)
- * @param C Input/Output matrix C (M x N)
- * @param M Number of rows in A and C
- * @param N Number of columns in B and C
- * @param K Number of columns in A and rows in B
- * @param alpha Scaling factor for A*B
- * @param beta Scaling factor for C
- * @param opmode Operation mode (default: "default")
- * @param version Kernel variant ID (default: 1)
- * @param stream CUDA stream for asynchronous execution (default: 0)
- */
-template<typename T>
-void gemm_scaled(const T* A, const T* B, T* C, int M, int N, int K, 
-                 T alpha, T beta, const char* opmode = "default", int version = 1, cudaStream_t stream = 0);
-
-/**
  * @brief Complete WGMMA-based GEMM dispatch for FP16 (Hopper SM90+)
  * 
  * @param A Input matrix A (M x K, row-major)
@@ -92,32 +72,50 @@ void gemm_scaled(const T* A, const T* B, T* C, int M, int N, int K,
  * @param M Number of rows in A and C
  * @param N Number of columns in B and C
  * @param K Number of columns in A and rows in B
- * @param lhs_mode "N" for normal A, "T" for transpose A
- * @param rhs_mode "N" for normal B, "T" for transpose B
+ * @param lhs_format Storage format for A ('R' for row-major, 'C' for column-major)
+ * @param rhs_format Storage format for B ('R' for row-major, 'C' for column-major)
+ * @param tile_M Tile size for M dimension
+ * @param tile_N Tile size for N dimension
+ * @param tile_K Tile size for K dimension
  * @param stream CUDA stream for asynchronous execution
  */
 void gemm_wgmma_fp16_dispatch(const void* A, const void* B, void* C,
                               int M, int N, int K, 
                               char lhs_format, char rhs_format,
+                              int tile_M, int tile_N, int tile_K,
                               cudaStream_t stream = 0);
 
 /**
- * @brief Individual mode WGMMA functions for FP16 (Hopper SM90+)
- */
-void gemm_wgmma_fp16_nn(const void* A, const void* B, void* C,
-                        int M, int N, int K, cudaStream_t stream = 0);
-void gemm_wgmma_fp16_nt(const void* A, const void* B, void* C,
-                        int M, int N, int K, cudaStream_t stream = 0);
-void gemm_wgmma_fp16_tn(const void* A, const void* B, void* C,
-                        int M, int N, int K, cudaStream_t stream = 0);
-void gemm_wgmma_fp16_tt(const void* A, const void* B, void* C,
-                        int M, int N, int K, cudaStream_t stream = 0);
-
-/**
- * @brief Default WGMMA-based GEMM for FP16 (backward compatibility)
+ * @brief WGMMA-based GEMM for FP16 with configurable tile sizes from config.yaml
+ * 
+ * @param A Input matrix A
+ * @param B Input matrix B
+ * @param C Output matrix C
+ * @param M Number of rows in A and C
+ * @param N Number of columns in B and C
+ * @param K Number of columns in A and rows in B
+ * @param lhs_format Storage format for A ('R' for row-major, 'C' for column-major)
+ * @param rhs_format Storage format for B ('R' for row-major, 'C' for column-major)
+ * @param stream CUDA stream for asynchronous execution
  */
 void gemm_wgmma_fp16(const void* A, const void* B, void* C,
-                     int M, int N, int K, cudaStream_t stream = 0);
+                     int M, int N, int K, 
+                     char lhs_format, char rhs_format,
+                     cudaStream_t stream = 0);
+
+// Version 2: WGMMA with TMA
+void gemm_wgmma_tma_fp16_dispatch(const void* A, const void* B, void* C,
+                                  int M, int N, int K, 
+                                  char lhs_format, char rhs_format,
+                                  int tile_M, int tile_N, int tile_K,
+                                  cudaStream_t stream);
+
+// Version 2 with config support
+void gemm_wgmma_tma_fp16(const void* A, const void* B, void* C,
+                         int M, int N, int K, 
+                         char lhs_format, char rhs_format,
+                         cudaStream_t stream);
+
 
 } // namespace cute
 } // namespace kebab
