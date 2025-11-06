@@ -615,16 +615,5 @@ void gemm_wgmma_fp16(const void* A_ptr, const void* B_ptr, void* C_ptr,
 {
     gemm_wgmma_fp16_rr(A_ptr, B_ptr, C_ptr, M, N, K, stream);
 }
-
-// Stub for TMA version (not yet implemented)
-void gemm_wgmma_tma_fp16_dispatch(const void* A_ptr, const void* B_ptr, void* C_ptr,
-                                  int M, int N, int K, 
-                                  char lhs_format, char rhs_format,
-                                  cudaStream_t stream)
-{
-    fprintf(stderr, "ERROR: WGMMA with TMA not yet implemented\n");
-    exit(EXIT_FAILURE);
-}
-
-} // namespace core
+} // namespace cute
 } // namespace kebab
