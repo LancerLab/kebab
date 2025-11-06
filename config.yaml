@@ -60,7 +60,7 @@ operators:
     # cute version 1: WGMMA without TMA
     # cute version 2: WGMMA with TMA
     # cute version 3: optimized tile sizes (future)
-    version: 1
+    version: 2
     # Initialization method for matrices A and B
     # Format: <A_init>-<B_init>
     # Options: one, rand, range, row, col
@@ -76,7 +76,7 @@ operators:
     # - RC: A is row-major, B is column-major
     # - CR: A is column-major, B is row-major
     # - CC: Both A and B are column-major
-    modes: [RC, CR]
+    modes: [RC]
     # Precision: float32, float16
     precisions: [float16]
     # Tile sizes (for tuning): [M, N, K]

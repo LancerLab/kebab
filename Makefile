@@ -1,7 +1,7 @@
 # CuTeKernelLib Makefile
 # High-performance kernel library using NVIDIA CUTLASS CuTe
 
-.PHONY: all setup build clean help test gpu-info
+.PHONY: all setup build clean help test gpu-info gpu-reset
 
 # ============================================================================
 # OS Detection
@@ -278,6 +278,7 @@ help:
 	@echo "  make clean              - Remove build artifacts"
 	@echo "  make help               - Show this help message"
 	@echo "  make gpu-info           - Display GPU and CUDA information"
+	@echo "  make gpu-reset          - Kill GPU processes and reset GPU state"
 	@echo ""
 	@echo "Test targets:"
 	@echo "  make test               - Run all tests (uses bench-gemm with verification)"
@@ -286,8 +287,9 @@ help:
 	@$(foreach op,$(OPERATORS_TGT),echo "  make bench-$(op)";)
 	@echo "  make bench-all          - Run all benchmarks and generate summary"
 	@echo ""
-	@echo "Profiling targets (after build):"
+	@echo "Profiling targets (single-run, no loops, for Nsight Compute):"
 	@$(foreach op,$(OPERATORS_TGT),echo "  make tune-$(op)";)
+	@$(foreach op,$(OPERATORS_TGT),echo "  make tune-$(op)-ref";)
 	@echo "  make tune-all           - Profile all operators with ncu"
 	@echo "=========================================="
 
@@ -326,6 +328,68 @@ gpu-info:
 	else \
 		echo "NCU: Not found"; \
 	fi
+	@echo "=========================================="
+
+# Reset GPU - Kill GPU processes and reset GPU state
+gpu-reset:
+	@echo "=========================================="
+	@echo "GPU Reset - Killing GPU Processes"
+	@echo "=========================================="
+	@echo ""
+	@echo "[1/3] Checking for GPU processes using fuser..."
+	@FUSER=$$(which fuser 2>/dev/null); \
+	if [ -z "$$FUSER" ]; then \
+		echo "  ✗ ERROR: fuser command not found"; \
+		echo "  Please install psmisc package:"; \
+		echo "    Ubuntu/Debian: sudo apt-get install psmisc"; \
+		echo "    Fedora/RHEL:   sudo dnf install psmisc"; \
+		echo "    Arch Linux:    sudo pacman -S psmisc"; \
+		exit 1; \
+	fi
+	@echo "  ✓ fuser found"
+	@echo ""
+	@echo "[2/3] Listing GPU processes..."
+	@FUSER=$$(which fuser 2>/dev/null); \
+	GPU_PROCS=$$($$FUSER /dev/nvidia* 2>/dev/null | tr ' ' '\n' | sort -u); \
+	if [ -z "$$GPU_PROCS" ]; then \
+		echo "  ℹ No GPU processes found"; \
+	else \
+		echo "  Found GPU processes:"; \
+		for pid in $$GPU_PROCS; do \
+			if [ -n "$$pid" ] && [ "$$pid" != "kernel" ]; then \
+				CMD=$$(ps -p $$pid -o comm= 2>/dev/null || echo "unknown"); \
+				echo "    PID: $$pid ($$CMD)"; \
+			fi; \
+		done; \
+	fi
+	@echo ""
+	@echo "[3/3] Killing GPU processes..."
+	@FUSER=$$(which fuser 2>/dev/null); \
+	GPU_PROCS=$$($$FUSER /dev/nvidia* 2>/dev/null | tr ' ' '\n' | sort -u); \
+	KILLED=0; \
+	for pid in $$GPU_PROCS; do \
+		if [ -n "$$pid" ] && [ "$$pid" != "kernel" ]; then \
+			if kill -9 $$pid 2>/dev/null; then \
+				echo "  ✓ Killed process $$pid"; \
+				KILLED=$$((KILLED + 1)); \
+			else \
+				echo "  ⚠ Failed to kill process $$pid (may require sudo)"; \
+			fi; \
+		fi; \
+	done; \
+	if [ $$KILLED -eq 0 ]; then \
+		echo "  ℹ No processes were killed"; \
+	else \
+		echo "  ✓ Killed $$KILLED process(es)"; \
+	fi
+	@echo ""
+	@echo "=========================================="
+	@echo "GPU Reset Complete!"
+	@echo "=========================================="
+	@echo ""
+	@echo "Note: If you see 'Failed to kill process' messages,"
+	@echo "you may need to run with sudo:"
+	@echo "  sudo make gpu-reset"
 	@echo "=========================================="
 
 # ============================================================================
@@ -493,10 +557,10 @@ bench-all:
 # Profiling Targets (Auto-generated from OPERATORS list)
 # ============================================================================
 
-# Generate profiling targets for each operator
+# Generate profiling targets for each operator (single-run, no loops)
 $(addprefix tune-,$(OPERATORS_TGT)): tune-%: build
 	@echo "=========================================="
-	@echo "Profiling $(subst -,_,$*) with Nsight Compute"
+	@echo "Profiling $(subst -,_,$*) Kernel (Single Run)"
 	@echo "=========================================="
 	@NCU=$$(which ncu 2>/dev/null || which nv-nsight-cu-cli 2>/dev/null); \
 	if [ -z "$$NCU" ]; then \
@@ -525,16 +589,78 @@ $(addprefix tune-,$(OPERATORS_TGT)): tune-%: build
 	echo "Using NCU: $$NCU (Version $$NCU_VERSION)"; \
 	$(MKDIR) $(PROFILING_DIR); \
 	TIMESTAMP=$$(date +%Y%m%d_%H%M%S); \
-	PROFILE_NAME="$(subst -,_,$*)_$${TIMESTAMP}_profile"; \
+	PROFILE_NAME="$(subst -,_,$*)_runonce_$${TIMESTAMP}_profile"; \
 	echo ""; \
-	echo "Running ncu profiler (this may take several minutes)..."; \
+	echo "Running ncu profiler on $(subst -,_,$*) kernel (single run)..."; \
 	echo "Output will be saved to: $(PROFILING_DIR)/$${PROFILE_NAME}.ncu-rep"; \
 	echo ""; \
-	$$NCU --set basic \
+	$$NCU --set full \
 		--export $(PROFILING_DIR)/$${PROFILE_NAME} \
 		--force-overwrite \
 		--target-processes all \
-		$(BUILD_DIR)/lib/benchmark/bench_$(subst -,_,$*) || \
+		$(BUILD_DIR)/lib/benchmark/runonce_$(subst -,_,$*) || \
+		{ echo ""; \
+		  echo "  ⚠ Warning: Profiling completed with errors"; \
+		  echo "  Profile data may still be available."; \
+		  echo ""; \
+		}; \
+	echo ""; \
+	echo "=========================================="; \
+	echo "Profiling Complete!"; \
+	echo "=========================================="; \
+	if [ -f "$(PROFILING_DIR)/$${PROFILE_NAME}.ncu-rep" ]; then \
+		echo "Results saved to:"; \
+		echo "  - NCU Report:  $(PROFILING_DIR)/$${PROFILE_NAME}.ncu-rep"; \
+		echo ""; \
+		echo "To view in Nsight Compute GUI:"; \
+		echo "  ncu-ui $(PROFILING_DIR)/$${PROFILE_NAME}.ncu-rep"; \
+	else \
+		echo "  ✗ Profiling failed - no report generated"; \
+	fi; \
+	echo "=========================================="
+
+# Generate reference profiling targets for each operator (single-run, no loops)
+$(addsuffix -ref,$(addprefix tune-,$(OPERATORS_TGT))): tune-%-ref: build
+	@echo "=========================================="
+	@echo "Profiling $(subst -,_,$*) Reference Kernel (Single Run)"
+	@echo "=========================================="
+	@NCU=$$(which ncu 2>/dev/null || which nv-nsight-cu-cli 2>/dev/null); \
+	if [ -z "$$NCU" ]; then \
+		echo "Searching for Nsight Compute installation..."; \
+		for base_path in /usr/local/cuda-* /opt/nvidia/nsight-compute /usr/local/cuda $(CUDA_PATH); do \
+			if [ -d "$$base_path" ]; then \
+				for ncu_path in $$base_path/bin/ncu $$base_path/nsight-compute*/ncu $$base_path/nsight-compute/ncu; do \
+					if [ -x "$$ncu_path" ]; then \
+						NCU="$$ncu_path"; \
+						break 2; \
+					fi; \
+				done; \
+			fi; \
+		done; \
+	fi; \
+	if [ -z "$$NCU" ] || [ ! -x "$$NCU" ]; then \
+		echo ""; \
+		echo "  ✗ ERROR: Nsight Compute (ncu) not found"; \
+		echo ""; \
+		echo "  Please install Nsight Compute:"; \
+		echo "    https://developer.nvidia.com/nsight-compute"; \
+		echo ""; \
+		exit 1; \
+	fi; \
+	NCU_VERSION=$$($$NCU --version 2>/dev/null | grep -oP 'Version \K[0-9]+\.[0-9]+' | head -n1); \
+	echo "Using NCU: $$NCU (Version $$NCU_VERSION)"; \
+	$(MKDIR) $(PROFILING_DIR); \
+	TIMESTAMP=$$(date +%Y%m%d_%H%M%S); \
+	PROFILE_NAME="$(subst -,_,$*)_ref_$${TIMESTAMP}_profile"; \
+	echo ""; \
+	echo "Running ncu profiler on $(subst -,_,$*) reference kernel (single run)..."; \
+	echo "Output will be saved to: $(PROFILING_DIR)/$${PROFILE_NAME}.ncu-rep"; \
+	echo ""; \
+	$$NCU --set full \
+		--export $(PROFILING_DIR)/$${PROFILE_NAME} \
+		--force-overwrite \
+		--target-processes all \
+		$(BUILD_DIR)/lib/benchmark/runonce_$(subst -,_,$*)_ref || \
 		{ echo ""; \
 		  echo "  ⚠ Warning: Profiling completed with errors"; \
 		  echo "  Profile data may still be available."; \
@@ -563,6 +689,7 @@ tune-all:
 		echo ""; \
 		echo "Profiling operator: $(op)"; \
 		$(MAKE) tune-$(op) || exit 1; \
+		$(MAKE) tune-$(op)-ref || exit 1; \
 	)
 	@echo ""
 	@echo "=========================================="

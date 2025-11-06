@@ -14,9 +14,37 @@ add_executable(bench_gemm
 target_include_directories(bench_gemm PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(bench_gemm kebab benchmark_runner CUDA::cublas)
 
+# Single-run GEMM kernel for profiling (no loops, no cublas)
+add_executable(runonce_gemm
+    runonce_gemm.cu
+)
+target_include_directories(runonce_gemm PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(runonce_gemm kebab benchmark_runner)
+
+# Single-run cuBLAS reference kernel for profiling
+add_executable(runonce_gemm_ref
+    runonce_gemm_ref.cu
+)
+target_include_directories(runonce_gemm_ref PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(runonce_gemm_ref kebab benchmark_runner CUDA::cublas)
+
 # Element-wise add benchmark
 add_executable(bench_elementwise_add
     bench_elementwise_add.cu
 )
 target_include_directories(bench_elementwise_add PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(bench_elementwise_add kebab benchmark_runner)
+
+# Single-run elementwise_add kernel for profiling (no loops, no cublas)
+add_executable(runonce_elementwise_add
+    runonce_elementwise_add.cu
+)
+target_include_directories(runonce_elementwise_add PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(runonce_elementwise_add kebab benchmark_runner)
+
+# Single-run CUDA baseline elementwise_add reference kernel for profiling
+add_executable(runonce_elementwise_add_ref
+    runonce_elementwise_add_ref.cu
+)
+target_include_directories(runonce_elementwise_add_ref PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(runonce_elementwise_add_ref kebab benchmark_runner)
