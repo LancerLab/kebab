@@ -325,6 +325,14 @@ bool ConfigParser::getOperatorVerbose(const std::string& op_name) const {
     return impl_->get<bool>(key, false);
 }
 
+int ConfigParser::getOperatorGpuId(const std::string& op_name) const {
+    if (!loaded_) {
+        throw std::runtime_error("Configuration not loaded");
+    }
+    std::string key = "operators." + op_name + ".gpu_id";
+    return impl_->get<int>(key, 0);  // Default to GPU 0
+}
+
 
 
 } // namespace config

@@ -62,7 +62,8 @@ public:
     // New: Verbose output control
     bool getOperatorVerbose(const std::string& op_name) const;
     
-
+    // New: GPU device ID selection
+    int getOperatorGpuId(const std::string& op_name) const;
     
     // Utility
     void reload(const std::string& config_path = "");

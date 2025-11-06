@@ -34,6 +34,9 @@ profiling:
 operators:
   elementwise_add:
     enabled: true
+    # GPU device ID to run on (0-based index, -1 for auto-select)
+    # Use nvidia-smi to see available GPUs
+    gpu_id: 0
     sizes: [256, 512, 1024, 2048, 4096]
     # Implementation: cuda (baseline) | cute (CuTe implementation)
     impl: cute
@@ -48,6 +51,8 @@ operators:
     
   gemm:
     enabled: true
+    # GPU device ID to run on (0-based index, -1 for auto-select)
+    gpu_id: 0
     # Implementation: cuda (baseline) | cute (CuTe/WGMMA implementation)
     impl: cute
     # Version: kernel variant ID
@@ -80,14 +85,17 @@ operators:
     
   fft:
     enabled: false
+    gpu_id: 0
     sizes: [1024, 2048, 4096, 8192]
     
   conv2d:
     enabled: false
+    gpu_id: 0
     channels: [32, 64, 128]
     kernel_sizes: [3, 5, 7]
     
   reduction:
     enabled: false
+    gpu_id: 0
     sizes: [1024, 2048, 4096, 8192]
 

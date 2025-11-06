@@ -167,6 +167,25 @@ int main(int argc, char** argv) {
         // Load configuration
         auto& config = ConfigParser::getInstance("config.yaml");
         
+        // Set GPU device from config
+        int gpu_id = config.getOperatorGpuId("elementwise_add");
+        int device_count;
+        CUDA_CHECK(cudaGetDeviceCount(&device_count));
+        
+        if (gpu_id >= 0 && gpu_id < device_count) {
+            CUDA_CHECK(cudaSetDevice(gpu_id));
+            std::cout << "Using GPU " << gpu_id << " (from config)" << std::endl;
+        } else if (gpu_id >= device_count) {
+            std::cerr << "Warning: GPU " << gpu_id << " not available (only " << device_count 
+                      << " GPUs detected). Using GPU 0." << std::endl;
+            CUDA_CHECK(cudaSetDevice(0));
+            gpu_id = 0;
+        } else {
+            // gpu_id < 0, auto-select
+            CUDA_CHECK(cudaGetDevice(&gpu_id));
+            std::cout << "Auto-selected GPU " << gpu_id << std::endl;
+        }
+        
         int warmup_runs = config.getWarmupRuns();
         int measurement_runs = config.getMeasurementRuns();
         std::vector<int> batch_sizes = config.getBatchSizes();
@@ -187,7 +206,7 @@ int main(int argc, char** argv) {
         
         // Print GPU information
         cudaDeviceProp prop;
-        CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
+        CUDA_CHECK(cudaGetDeviceProperties(&prop, gpu_id));
         std::cout << "\n========================================" << std::endl;
         std::cout << "GPU Information" << std::endl;
         std::cout << "========================================" << std::endl;

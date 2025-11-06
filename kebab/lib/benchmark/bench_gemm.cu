@@ -438,7 +438,27 @@ int main(int argc, char** argv) {
     auto& config = ConfigParser::getInstance("config.yaml");
     std::cout << "Configuration loaded successfully from: config.yaml" << std::endl;
     
+    // Set GPU device from config
+    int gpu_id = config.getOperatorGpuId("gemm");
+    int device_count;
+    CUDA_CHECK(cudaGetDeviceCount(&device_count));
+    
+    if (gpu_id >= 0 && gpu_id < device_count) {
+        CUDA_CHECK(cudaSetDevice(gpu_id));
+        std::cout << "Using GPU " << gpu_id << " (from config)" << std::endl;
+    } else if (gpu_id >= device_count) {
+        std::cerr << "Warning: GPU " << gpu_id << " not available (only " << device_count 
+                  << " GPUs detected). Using GPU 0." << std::endl;
+        CUDA_CHECK(cudaSetDevice(0));
+        gpu_id = 0;
+    } else {
+        // gpu_id < 0, auto-select
+        CUDA_CHECK(cudaGetDevice(&gpu_id));
+        std::cout << "Auto-selected GPU " << gpu_id << std::endl;
+    }
+    
     std::cout << "Configuration:" << std::endl;
+    std::cout << "  GPU ID:           " << gpu_id << std::endl;
     std::cout << "  Warmup runs:      " << config.getWarmupRuns() << std::endl;
     std::cout << "  Measurement runs: " << config.getMeasurementRuns() << std::endl;
     
