@@ -415,7 +415,7 @@ gemm_tt(int m, int n, int k,
 
   // Launch parameter setup
   dim3 dimBlock(size(tiled_mma));
-  dim3 dimCluster(1, 1, 1);
+  dim3 dimCluster(4, 2, 1);
   dim3 dimGrid(round_up(size(ceil_div(m, bM)), dimCluster.x),
                round_up(size(ceil_div(n, bN)), dimCluster.y));
   int  smemBytes = sizeof(SharedStorage<TA, TB, decltype(sA), decltype(sB)>);
@@ -497,7 +497,7 @@ gemm_tn(int m, int n, int k,
   // Launch parameter setup
   int smem_size = int(sizeof(SharedStorage<TA, TB, decltype(sA), decltype(sB)>));
   dim3 dimBlock(size(tiled_mma));
-  dim3 dimCluster(1, 1, 1);
+  dim3 dimCluster(4, 2, 1);
   dim3 dimGrid(round_up(size(ceil_div(m, bM)), dimCluster.x),
                round_up(size(ceil_div(n, bN)), dimCluster.y));
   cutlass::ClusterLaunchParams params = {dimGrid, dimBlock, dimCluster, smem_size};

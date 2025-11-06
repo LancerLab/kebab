@@ -493,88 +493,6 @@ bench-all:
 # Profiling Targets (Auto-generated from OPERATORS list)
 # ============================================================================
 
-# Define a template for profiling targets
-define TUNE_TEMPLATE
-tune-$(1): build
-	@echo "=========================================="
-	@echo "Profiling $(subst -,_,$(1)) with Nsight Compute"
-	@echo "=========================================="
-	@NCU=$$(which ncu 2>/dev/null || which nv-nsight-cu-cli 2>/dev/null); \
-	DRIVER_VER=$$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1 | cut -d. -f1); \
-	DRIVER_CUDA_VER=""; \
-	if [ -n "$$DRIVER_VER" ]; then \
-		if [ $$DRIVER_VER -ge 580 ]; then DRIVER_CUDA_VER="13.0"; \
-		elif [ $$DRIVER_VER -ge 570 ]; then DRIVER_CUDA_VER="12.8"; \
-		elif [ $$DRIVER_VER -ge 560 ]; then DRIVER_CUDA_VER="12.6"; \
-		elif [ $$DRIVER_VER -ge 550 ]; then DRIVER_CUDA_VER="12.4"; \
-		elif [ $$DRIVER_VER -ge 535 ]; then DRIVER_CUDA_VER="12.2"; \
-		elif [ $$DRIVER_VER -ge 525 ]; then DRIVER_CUDA_VER="12.0"; \
-		elif [ $$DRIVER_VER -ge 515 ]; then DRIVER_CUDA_VER="11.8"; \
-		elif [ $$DRIVER_VER -ge 510 ]; then DRIVER_CUDA_VER="11.6"; \
-		else DRIVER_CUDA_VER="11.0"; \
-		fi; \
-		echo "Driver supports CUDA $$DRIVER_CUDA_VER or earlier"; \
-	fi; \
-	if [ -z "$$NCU" ]; then \
-		echo "Searching for Nsight Compute installation..."; \
-		for base_path in /usr/local/cuda-* /opt/nvidia/nsight-compute /usr/local/cuda $(CUDA_PATH); do \
-			if [ -d "$$base_path" ]; then \
-				for ncu_path in $$base_path/bin/ncu $$base_path/nsight-compute*/ncu $$base_path/nsight-compute/ncu; do \
-					if [ -x "$$ncu_path" ]; then \
-						NCU="$$ncu_path"; \
-						break 2; \
-					fi; \
-				done; \
-			fi; \
-		done; \
-	fi; \
-	if [ -z "$$NCU" ] || [ ! -x "$$NCU" ]; then \
-		echo ""; \
-		echo "  ✗ ERROR: Nsight Compute (ncu) not found or not executable"; \
-		echo ""; \
-		echo "  Nsight Compute is required for profiling."; \
-		echo "  Installation options:"; \
-		echo "    1. Install with CUDA toolkit (recommended)"; \
-		echo "    2. Download standalone from:"; \
-		echo "       https://developer.nvidia.com/nsight-compute"; \
-		echo ""; \
-		echo "  After installation, ensure ncu is in PATH or install in standard location"; \
-		echo ""; \
-		exit 1; \
-	fi; \
-	NCU_VERSION=$$($$NCU --version 2>/dev/null | grep -oP 'Version \K[0-9]+\.[0-9]+' | head -n1); \
-	echo "Using NCU: $$NCU (Version $$NCU_VERSION)"; \
-	$(MKDIR) $(PROFILING_DIR); \
-	echo ""; \
-	echo "Running ncu profiler (this may take several minutes)..."; \
-	echo "Output will be saved to: $(PROFILING_DIR)/$(subst -,_,$(1))_profile.ncu-rep"; \
-	echo ""; \
-	$$NCU --set full \
-		--export $(PROFILING_DIR)/$(subst -,_,$(1))_profile \
-		--force-overwrite \
-		--target-processes all \
-		$(BUILD_DIR)/lib/benchmark/bench_$(subst -,_,$(1)) || \
-		{ echo ""; \
-		  echo "  ⚠ Warning: Profiling completed with errors (may be due to driver compatibility)"; \
-		  echo "  Profile data was still collected and saved."; \
-		  echo ""; \
-		}; \
-	echo ""; \
-	echo "=========================================="; \
-	echo "Profiling Complete!"; \
-	echo "=========================================="; \
-	if [ -f "$(PROFILING_DIR)/$(subst -,_,$(1))_profile.ncu-rep" ]; then \
-		echo "Results saved to:"; \
-		echo "  - NCU Report:  $(PROFILING_DIR)/$(subst -,_,$(1))_profile.ncu-rep"; \
-		echo ""; \
-		echo "To view detailed report in Nsight Compute GUI:"; \
-		echo "  ncu-ui $(PROFILING_DIR)/$(subst -,_,$(1))_profile.ncu-rep"; \
-	else \
-		echo "  ✗ Profiling failed - no report generated"; \
-	fi; \
-	echo "=========================================="
-endef
-
 # Generate profiling targets for each operator
 $(addprefix tune-,$(OPERATORS_TGT)): tune-%: build
 	@echo "=========================================="
@@ -612,7 +530,7 @@ $(addprefix tune-,$(OPERATORS_TGT)): tune-%: build
 	echo "Running ncu profiler (this may take several minutes)..."; \
 	echo "Output will be saved to: $(PROFILING_DIR)/$${PROFILE_NAME}.ncu-rep"; \
 	echo ""; \
-	$$NCU --set full \
+	$$NCU --set basic \
 		--export $(PROFILING_DIR)/$${PROFILE_NAME} \
 		--force-overwrite \
 		--target-processes all \
