@@ -8,7 +8,7 @@ build:
 
 # Benchmark Configuration
 benchmark:
-  warmup_runs: 10
+  warmup_runs: 20
   measurement_runs: 100
   batch_sizes: [256, 512, 1024, 2048, 4096]
   data_types: [float32, float16]
