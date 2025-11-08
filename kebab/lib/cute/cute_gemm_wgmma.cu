@@ -422,9 +422,21 @@ gemm_tt(int m, int n, int k,
 
   // Launch parameter setup
   dim3 dimBlock(size(tiled_mma));
-  dim3 dimCluster(4, 2, 1);
-  dim3 dimGrid(round_up(size(ceil_div(m, bM)), dimCluster.x),
-               round_up(size(ceil_div(n, bN)), dimCluster.y));
+
+  // Calculate required grid size
+  int grid_m = size(ceil_div(m, bM));
+  int grid_n = size(ceil_div(n, bN));
+
+  // Adjust cluster size based on grid size to avoid over-allocation
+  // For small matrices, use smaller cluster to avoid launching unnecessary blocks
+  dim3 dimCluster(
+    (grid_m >= 4) ? 4 : ((grid_m >= 2) ? 2 : 1),
+    (grid_n >= 2) ? 2 : 1,
+    1
+  );
+
+  dim3 dimGrid(round_up(grid_m, dimCluster.x),
+               round_up(grid_n, dimCluster.y));
   int  smemBytes = sizeof(SharedStorage<TA, TB, decltype(sA), decltype(sB)>);
 
   auto* kernel_ptr = &gemm_device<decltype(prob_shape), decltype(cta_tiler),
@@ -506,9 +518,21 @@ gemm_tn(int m, int n, int k,
   // Launch parameter setup
   int smem_size = int(sizeof(SharedStorage<TA, TB, decltype(sA), decltype(sB)>));
   dim3 dimBlock(size(tiled_mma));
-  dim3 dimCluster(4, 2, 1);
-  dim3 dimGrid(round_up(size(ceil_div(m, bM)), dimCluster.x),
-               round_up(size(ceil_div(n, bN)), dimCluster.y));
+
+  // Calculate required grid size
+  int grid_m = size(ceil_div(m, bM));
+  int grid_n = size(ceil_div(n, bN));
+
+  // Adjust cluster size based on grid size to avoid over-allocation
+  // For small matrices, use smaller cluster to avoid launching unnecessary blocks
+  dim3 dimCluster(
+    (grid_m >= 4) ? 4 : ((grid_m >= 2) ? 2 : 1),
+    (grid_n >= 2) ? 2 : 1,
+    1
+  );
+
+  dim3 dimGrid(round_up(grid_m, dimCluster.x),
+               round_up(grid_n, dimCluster.y));
   cutlass::ClusterLaunchParams params = {dimGrid, dimBlock, dimCluster, smem_size};
 
   void const* kernel_ptr = reinterpret_cast<void const*>(
