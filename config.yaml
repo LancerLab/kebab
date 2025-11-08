@@ -76,7 +76,7 @@ operators:
     # - RC: A is row-major, B is column-major
     # - CR: A is column-major, B is row-major
     # - CC: Both A and B are column-major
-    modes: [CR, RC]
+    modes: [RC, CR]
     # Precision: float32, float16
     precisions: [float16]
     # Tile sizes (for tuning): [M, N, K]

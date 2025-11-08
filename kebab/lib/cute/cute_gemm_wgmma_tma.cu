@@ -210,9 +210,11 @@ gemm_nt_tma(int m, int n, int k,
   auto K = int(k);
   auto prob_shape = make_shape(M, N, K);
 
-  auto dA = make_stride(Int<1>{}, ldA);
-  auto dB = make_stride(Int<1>{}, ldB);
-  auto dC = make_stride(Int<1>{}, ldC);
+  // For NT: A is col-major (M×K), B is row-major (N×K)
+  // Both treated as (M,K) and (N,K) with col-major strides for TMA
+  auto dA = make_stride(Int<1>{}, ldA);  // (1, ldA) - col-major
+  auto dB = make_stride(Int<1>{}, ldB);  // (1, ldB) - col-major
+  auto dC = make_stride(Int<1>{}, ldC);  // (1, ldC) - col-major
 
   // Define CTA tile sizes (static) - now configurable via template parameters
   auto bM = Int<BLK_M>{};
@@ -224,7 +226,7 @@ gemm_nt_tma(int m, int n, int k,
   auto sA = tile_to_shape(GMMA::Layout_MN_SW128_Atom<TA>{}, make_shape(bM,bK,bP));
   auto sB = tile_to_shape(GMMA::Layout_MN_SW128_Atom<TB>{}, make_shape(bN,bK,bP));
 
-  TiledMMA tiled_mma = make_tiled_mma(SM90_64x128x16_F16F16F16_SS<GMMA::Major::MN,GMMA::Major::MN>{});
+  TiledMMA tiled_mma = make_tiled_mma(SM90_64x64x16_F16F16F16_SS<GMMA::Major::MN,GMMA::Major::MN>{});
 
   Tensor mA = make_tensor(A, make_shape(M,K), dA);
   Tensor mB = make_tensor(B, make_shape(N,K), dB);
@@ -280,11 +282,12 @@ gemm_tn_tma(int m, int n, int k,
   auto prob_shape = make_shape(M, N, K);
 
   // For TN: A is row-major (M×K), B is col-major (K×N)
+  // But we treat B as (N, K) in the kernel for TMA compatibility
   // dA = (M, K):(ldA, 1), row-major
   auto dA = make_stride(ldA, Int<1>{});
-  // dB = (K, N):(1, ldB), col-major
-  auto dB = make_stride(Int<1>{}, ldB);
-  // C is row-major (M×N)
+  // dB = (N, K):(ldB, 1), treated as row-major for TMA
+  auto dB = make_stride(ldB, Int<1>{});
+  // C is col-major (M×N):(1, ldC)
   auto dC = make_stride(Int<1>{}, ldC);
 
   // Define CTA tile sizes (static) - now configurable via template parameters
@@ -301,7 +304,7 @@ gemm_tn_tma(int m, int n, int k,
   auto sA = tile_to_shape(GMMA::Layout_K_SW128_Atom<TA>{}, make_shape(bM,bK,bP));
   auto sB = tile_to_shape(GMMA::Layout_K_SW128_Atom<TB>{}, make_shape(bN,bK,bP));
 
-  TiledMMA tiled_mma = make_tiled_mma(SM90_64x128x16_F16F16F16_SS<GMMA::Major::K,GMMA::Major::K>{});
+  TiledMMA tiled_mma = make_tiled_mma(SM90_64x64x16_F16F16F16_SS<GMMA::Major::K,GMMA::Major::K>{});
 
   Tensor mA = make_tensor(A, make_shape(M,K), dA);
   Tensor mB = make_tensor(B, make_shape(N,K), dB);
