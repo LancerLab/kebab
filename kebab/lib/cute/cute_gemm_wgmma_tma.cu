@@ -76,6 +76,16 @@ gemm_device_tma(ProblemShape shape_MNK, CtaTiler cta_tiler,
   Tensor mB = tma_b.get_tma_tensor(make_shape(N,K));
   Tensor mC = make_tensor(make_gmem_ptr(C_ptr), make_shape(M,N), dC);
 
+  // Debug print on first thread
+  // if (thread0()) {
+  //   printf("=== TN GEMM Kernel Debug Info ===\n");
+  //   printf("Problem shape (M,N,K): (%d,%d,%d)\n", M, N, K);
+  //   printf("CTA tiler: "); print(cta_tiler); printf("\n");
+  //   printf("mA shape: "); print(make_shape(M,K)); printf("\n");
+  //   printf("mB shape: "); print(make_shape(N,K)); printf("\n");
+  //   printf("mC shape: "); print(make_shape(M,N)); printf("\n");
+  // }
+
   auto cta_coord = make_coord(blockIdx.x, blockIdx.y, _);
   Tensor gA = local_tile(mA, cta_tiler, cta_coord, Step<_1, X,_1>{});
   Tensor gB = local_tile(mB, cta_tiler, cta_coord, Step< X,_1,_1>{});
@@ -214,7 +224,7 @@ gemm_nt_tma(int m, int n, int k,
   auto sA = tile_to_shape(GMMA::Layout_MN_SW128_Atom<TA>{}, make_shape(bM,bK,bP));
   auto sB = tile_to_shape(GMMA::Layout_MN_SW128_Atom<TB>{}, make_shape(bN,bK,bP));
 
-  TiledMMA tiled_mma = make_tiled_mma(SM90_64x64x16_F16F16F16_SS<GMMA::Major::MN,GMMA::Major::MN>{});
+  TiledMMA tiled_mma = make_tiled_mma(SM90_64x128x16_F16F16F16_SS<GMMA::Major::MN,GMMA::Major::MN>{});
 
   Tensor mA = make_tensor(A, make_shape(M,K), dA);
   Tensor mB = make_tensor(B, make_shape(N,K), dB);
@@ -263,26 +273,35 @@ gemm_tn_tma(int m, int n, int k,
             TC      * C, int ldC,
             cudaStream_t stream = 0)
 {
+  // M = N = K = 4096
   auto M = int(m);
   auto N = int(n);
   auto K = int(k);
   auto prob_shape = make_shape(M, N, K);
 
+  // For TN: A is row-major (M×K), B is col-major (K×N)
+  // dA = (M, K):(ldA, 1), row-major
   auto dA = make_stride(ldA, Int<1>{});
-  auto dB = make_stride(ldB, Int<1>{});
+  // dB = (K, N):(1, ldB), col-major
+  auto dB = make_stride(Int<1>{}, ldB);
+  // C is row-major (M×N)
   auto dC = make_stride(Int<1>{}, ldC);
 
   // Define CTA tile sizes (static) - now configurable via template parameters
-  auto bM = Int<BLK_M>{};
-  auto bN = Int<BLK_N>{};
-  auto bK = Int<BLK_K>{};
-  auto cta_tiler = make_shape(bM, bN, bK);
+  auto bM = Int<BLK_M>{}; // 128
+  auto bN = Int<BLK_N>{}; // 128
+  auto bK = Int<BLK_K>{}; // 64
+  auto cta_tiler = make_shape(bM, bN, bK); // (128, 128, 64)
   auto bP = Int<3>{};
 
+  // tile to shape ()
+  // tile m = 8; tile k = 1024, k-major
+  // using Layout_K_SW128_Atom_Bits  = ComposedLayout<Swizzle<3,4,3>, smem_ptr_flag, Layout<Shape<_8,_1024>,Stride<_1024,_1>>>;
+  // using Layout_K_SW128_Atom = decltype(upcast<sizeof_bits<Type>::value>(Layout_K_SW128_Atom_Bits{}));
   auto sA = tile_to_shape(GMMA::Layout_K_SW128_Atom<TA>{}, make_shape(bM,bK,bP));
   auto sB = tile_to_shape(GMMA::Layout_K_SW128_Atom<TB>{}, make_shape(bN,bK,bP));
 
-  TiledMMA tiled_mma = make_tiled_mma(SM90_64x64x16_F16F16F16_SS<GMMA::Major::K,GMMA::Major::K>{});
+  TiledMMA tiled_mma = make_tiled_mma(SM90_64x128x16_F16F16F16_SS<GMMA::Major::K,GMMA::Major::K>{});
 
   Tensor mA = make_tensor(A, make_shape(M,K), dA);
   Tensor mB = make_tensor(B, make_shape(N,K), dB);
@@ -291,6 +310,7 @@ gemm_tn_tma(int m, int n, int k,
   Copy_Atom tmaB = make_tma_atom(SM90_TMA_LOAD{}, mB, sB(_,_,0), make_shape(bN,bK));
 
   int smem_size = int(sizeof(SharedStorageTMA<TA, TB, decltype(sA), decltype(sB)>));
+  // threads needed to do this wgmma
   dim3 dimBlock(size(tiled_mma));
   dim3 dimCluster(2, 2, 1);
   dim3 dimGrid(round_up(size(ceil_div(m, bM)), dimCluster.x),
@@ -335,26 +355,30 @@ void gemm_wgmma_tma_fp16_dispatch(const void* A_ptr, const void* B_ptr, void* C_
     float beta = 0.0f;
     
     if (lhs_format == 'R' && rhs_format == 'C') {
-        // RC mode: A row-major, B column-major -> use NT layout
+        // RC mode: A row-major, B column-major -> use TN layout
         // Dispatch based on tile configuration
-        if (tile_M == 64 && tile_N == 64 && tile_K == 32) {
-            gemm_nt_tma<half_t, half_t, half_t, float, float, 64, 64, 32>(
-                N, M, K, alpha, B, K, A, K, beta, C, M, stream);
-        } else if (tile_M == 128 && tile_N == 128 && tile_K == 64) {
-            gemm_nt_tma<half_t, half_t, half_t, float, float, 128, 128, 64>(
-                N, M, K, alpha, B, K, A, K, beta, C, M, stream);
+        // Note: K dimension must be 64 for Layout_K_SW128_Atom compatibility
+        // For RC: A is row-major (M×K), B is col-major (K×N)
+        // ldB = K for col-major B (stride is (1, K))
+        if (tile_M == 128 && tile_N == 128 && tile_K == 64) {
+            gemm_tn_tma<half_t, half_t, half_t, float, float, 128, 128, 64>(
+                M, N, K, alpha, A, K, B, K, beta, C, M, stream);
         } else if (tile_M == 256 && tile_N == 128 && tile_K == 64) {
-            gemm_nt_tma<half_t, half_t, half_t, float, float, 256, 128, 64>(
-                N, M, K, alpha, B, K, A, K, beta, C, M, stream);
+            gemm_tn_tma<half_t, half_t, half_t, float, float, 256, 128, 64>(
+                M, N, K, alpha, A, K, B, K, beta, C, M, stream);
         } else if (tile_M == 128 && tile_N == 256 && tile_K == 64) {
-            gemm_nt_tma<half_t, half_t, half_t, float, float, 128, 256, 64>(
-                N, M, K, alpha, B, K, A, K, beta, C, M, stream);
+            gemm_tn_tma<half_t, half_t, half_t, float, float, 128, 256, 64>(
+                M, N, K, alpha, A, K, B, K, beta, C, M, stream);
         } else {
-            // Default fallback
-            fprintf(stderr, "Warning: Tile size [%d,%d,%d] not supported by TMA, using default [128,128,64]\n", 
-                    tile_M, tile_N, tile_K);
-            gemm_nt_tma<half_t, half_t, half_t, float, float, 128, 128, 64>(
-                N, M, K, alpha, B, K, A, K, beta, C, M, stream);
+            // Unsupported tile configuration - K must be 64 for GMMA Layout_K_SW128_Atom
+            if (tile_K != 64) {
+                fprintf(stderr, "Warning: TMA requires K=64 (got K=%d), using default [128,128,64]\n", tile_K);
+            } else {
+                fprintf(stderr, "Warning: Tile size [%d,%d,%d] not supported by TMA, using default [128,128,64]\n",
+                        tile_M, tile_N, tile_K);
+            }
+            gemm_tn_tma<half_t, half_t, half_t, float, float, 128, 128, 64>(
+                M, N, K, alpha, A, K, B, K, beta, C, M, stream);
         }
     } else if (lhs_format == 'C' && rhs_format == 'R') {
         // CR mode: A column-major, B row-major -> use TN layout
@@ -363,23 +387,23 @@ void gemm_wgmma_tma_fp16_dispatch(const void* A_ptr, const void* B_ptr, void* C_
             // Test if 64x64x32 works with TMA TN layout
             fprintf(stderr, "Warning: Tile size [%d,%d,%d] may not be supported by TMA TN due to GMMA constraints, using default [128,128,64]\n", 
                     tile_M, tile_N, tile_K);
-            gemm_tn_tma<half_t, half_t, half_t, float, float, 128, 128, 64>(
-                N, M, K, alpha, B, N, A, M, beta, C, M, stream);
+            gemm_nt_tma<half_t, half_t, half_t, float, float, 128, 128, 64>(
+                M, N, K, alpha, A, M, B, N, beta, C, M, stream);
         } else if (tile_M == 128 && tile_N == 128 && tile_K == 64) {
-            gemm_tn_tma<half_t, half_t, half_t, float, float, 128, 128, 64>(
-                N, M, K, alpha, B, N, A, M, beta, C, M, stream);
+            gemm_nt_tma<half_t, half_t, half_t, float, float, 128, 128, 64>(
+                M, N, K, alpha, A, M, B, N, beta, C, M, stream);
         } else if (tile_M == 256 && tile_N == 128 && tile_K == 64) {
-            gemm_tn_tma<half_t, half_t, half_t, float, float, 256, 128, 64>(
-                N, M, K, alpha, B, N, A, M, beta, C, M, stream);
+            gemm_nt_tma<half_t, half_t, half_t, float, float, 256, 128, 64>(
+                M, N, K, alpha, A, M, B, N, beta, C, M, stream);
         } else if (tile_M == 128 && tile_N == 256 && tile_K == 64) {
-            gemm_tn_tma<half_t, half_t, half_t, float, float, 128, 256, 64>(
-                N, M, K, alpha, B, N, A, M, beta, C, M, stream);
+            gemm_nt_tma<half_t, half_t, half_t, float, float, 128, 256, 64>(
+                M, N, K, alpha, A, M, B, N, beta, C, M, stream);
         } else {
             // Default fallback
             fprintf(stderr, "Warning: Tile size [%d,%d,%d] not supported by TMA TN, using default [128,128,64]\n", 
                     tile_M, tile_N, tile_K);
-            gemm_tn_tma<half_t, half_t, half_t, float, float, 128, 128, 64>(
-                N, M, K, alpha, B, N, A, M, beta, C, M, stream);
+            gemm_nt_tma<half_t, half_t, half_t, float, float, 128, 128, 64>(
+                M, N, K, alpha, A, M, B, N, beta, C, M, stream);
         }
     } else {
         fprintf(stderr, "ERROR: Invalid storage format combination for TMA: lhs=%c, rhs=%c\n", 

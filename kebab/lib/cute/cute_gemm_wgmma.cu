@@ -75,6 +75,13 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
   Tensor mC = make_tensor(make_gmem_ptr(C), select<0,1>(shape_MNK), dC); // (M,N)
 
   // Get the appropriate blocks for this thread block
+  // Check if this block is within bounds (handles cluster padding)
+  int m_blocks = ceil_div(size<0>(shape_MNK), size<0>(cta_tiler));
+  int n_blocks = ceil_div(size<1>(shape_MNK), size<1>(cta_tiler));
+  if (blockIdx.x >= m_blocks || blockIdx.y >= n_blocks) {
+    return;  // Out of bounds block, skip
+  }
+
   auto cta_coord = make_coord(blockIdx.x, blockIdx.y, _);              // (m,n,k)
   Tensor gA = local_tile(mA, cta_tiler, cta_coord, Step<_1, X,_1>{});  // (BLK_M,BLK_K,k)
   Tensor gB = local_tile(mB, cta_tiler, cta_coord, Step< X,_1,_1>{});  // (BLK_N,BLK_K,k)
@@ -465,8 +472,10 @@ gemm_tn(int m, int n, int k,
   auto prob_shape = make_shape(M, N, K);                     // (M, N, K)
 
   // Define TN strides (mixed)
-  auto dA = make_stride(ldA, Int<1>{});                      // (dM, dK)
-  auto dB = make_stride(ldB, Int<1>{});                      // (dN, dK)
+  // For TN: A is row-major (M×K), B is col-major (K×N)
+  // But we treat them as (M, K) and (N, K) for the kernel
+  auto dA = make_stride(ldA, Int<1>{});                      // (dM, dK) - A row-major
+  auto dB = make_stride(ldB, Int<1>{});                      // (dN, dK) - B treated as (N, K) row-major
   auto dC = make_stride(Int<1>{}, ldC);                      // (dM, dN)
 
   // Define CTA tile sizes (static) - now configurable via template parameters
@@ -578,55 +587,65 @@ void gemm_wgmma_fp16_dispatch(const void* A_ptr, const void* B_ptr, void* C_ptr,
     // This computes: C^T = opB(B) × opA(A)
     //
     // To align CuTe with cuBLAS naming:
-    // - When cuBLAS uses opA=T, opB=N: C^T = B × A^T, we should call gemm_nt (A^T × B after swap)
+    // - When cuBLAS uses opA=T, opB=N: C^T = B × A^T, we should call gemm_tn (A^T × B after swap)
     // - When cuBLAS uses opA=N, opB=T: C^T = B^T × A, we should call gemm_tn (A × B^T after swap)
     
     // Dispatch based on tile sizes and storage format
     if (lhs_format == 'R' && rhs_format == 'C') {
         // RC: cuBLAS uses opA=T, opB=N => C^T = B × A^T
-        // CuTe: gemm_nt computes C^T = A^T × B with row-major A,B
-        // After argument swap: gemm_nt(N, M, K, B, ldB, A, ldA, C, ldC)
-        
+        // CuTe: gemm_tn computes C^T = A^T × B with row-major A,B
+        // After argument swap: gemm_tn(N, M, K, B, ldB, A, ldA, C, ldC)
+
         // Dispatch based on tile configuration
-        if (tile_M == 64 && tile_N == 64 && tile_K == 32) {
-            gemm_nt<half_t, half_t, half_t, float, float, 64, 64, 32>(
-                N, M, K, alpha, B, K, A, K, beta, C, M, stream);
-        } else if (tile_M == 128 && tile_N == 128 && tile_K == 64) {
-            gemm_nt<half_t, half_t, half_t, float, float, 128, 128, 64>(
-                N, M, K, alpha, B, K, A, K, beta, C, M, stream);
+        // Note: K dimension must be 64 for Layout_K_SW128_Atom compatibility
+        // For RC mode: A is row-major (M×K), B is col-major (K×N)
+        // ldB = K for col-major B (stride is (1, K))
+        if (tile_M == 128 && tile_N == 128 && tile_K == 64) {
+            gemm_tn<half_t, half_t, half_t, float, float, 128, 128, 64>(
+                M, N, K, alpha, A, K, B, K, beta, C, M, stream);
         } else if (tile_M == 256 && tile_N == 128 && tile_K == 64) {
-            gemm_nt<half_t, half_t, half_t, float, float, 256, 128, 64>(
-                N, M, K, alpha, B, K, A, K, beta, C, M, stream);
+            gemm_tn<half_t, half_t, half_t, float, float, 256, 128, 64>(
+                M, N, K, alpha, A, K, B, K, beta, C, M, stream);
         } else if (tile_M == 128 && tile_N == 256 && tile_K == 64) {
-            gemm_nt<half_t, half_t, half_t, float, float, 128, 256, 64>(
-                N, M, K, alpha, B, K, A, K, beta, C, M, stream);
+            gemm_tn<half_t, half_t, half_t, float, float, 128, 256, 64>(
+                M, N, K, alpha, A, K, B, K, beta, C, M, stream);
         } else {
-            // Default fallback
-            gemm_nt<half_t, half_t, half_t, float, float, 128, 128, 64>(
-                N, M, K, alpha, B, K, A, K, beta, C, M, stream);
+            // Unsupported tile configuration - K must be 64 for GMMA Layout_K_SW128_Atom
+            if (tile_K != 64) {
+                fprintf(stderr, "Warning: Tile K=%d not supported (must be 64), using default [128,128,64]\n",
+                        tile_K);
+            } else {
+                fprintf(stderr, "Warning: Tile size [%d,%d,%d] not supported, using default [128,128,64]\n",
+                        tile_M, tile_N, tile_K);
+            }
+            gemm_tn<half_t, half_t, half_t, float, float, 128, 128, 64>(
+                M, N, K, alpha, A, K, B, K, beta, C, M, stream);
         }
     } else if (lhs_format == 'C' && rhs_format == 'R') {
         // CR: cuBLAS uses opA=N, opB=T => C^T = B^T × A
-        // CuTe: gemm_tn computes C^T = A × B^T with row-major A,B
-        // After argument swap: gemm_tn(N, M, K, B, ldB, A, ldA, C, ldC)
+        // CuTe: gemm_nt computes C^T = A × B^T with row-major A,B
+        // After argument swap: gemm_nt(N, M, K, B, ldB, A, ldA, C, ldC)
         
         // Dispatch based on tile configuration
-        // Note: gemm_tn has constraints due to GMMA layout requirements
-        if (tile_M == 128 && tile_N == 128 && tile_K == 64) {
-            gemm_tn<half_t, half_t, half_t, float, float, 128, 128, 64>(
-                N, M, K, alpha, B, N, A, M, beta, C, M, stream);
+        // Note: gemm_nt has constraints due to GMMA layout requirements
+        if (tile_M == 64 && tile_N == 64 && tile_K == 32) {
+            gemm_nt<half_t, half_t, half_t, float, float, 64, 64, 32>(
+                M, N, K, alpha, A, M, B, N, beta, C, M, stream);
+        } else if (tile_M == 128 && tile_N == 128 && tile_K == 64) {
+            gemm_nt<half_t, half_t, half_t, float, float, 128, 128, 64>(
+                M, N, K, alpha, A, M, B, N, beta, C, M, stream);
         } else if (tile_M == 256 && tile_N == 128 && tile_K == 64) {
-            gemm_tn<half_t, half_t, half_t, float, float, 256, 128, 64>(
-                N, M, K, alpha, B, N, A, M, beta, C, M, stream);
+            gemm_nt<half_t, half_t, half_t, float, float, 256, 128, 64>(
+                M, N, K, alpha, A, M, B, N, beta, C, M, stream);
         } else if (tile_M == 128 && tile_N == 256 && tile_K == 64) {
-            gemm_tn<half_t, half_t, half_t, float, float, 128, 256, 64>(
-                N, M, K, alpha, B, N, A, M, beta, C, M, stream);
+            gemm_nt<half_t, half_t, half_t, float, float, 128, 256, 64>(
+                M, N, K, alpha, A, M, B, N, beta, C, M, stream);
         } else {
-            // Unsupported tile size for gemm_tn, fall back to default
-            fprintf(stderr, "Warning: Tile size [%d,%d,%d] not supported by gemm_tn due to GMMA constraints, using default [128,128,64]\n", 
+            // Unsupported tile size for gemm_nt, fall back to default
+            fprintf(stderr, "Warning: Tile size [%d,%d,%d] not supported by gemm_nt due to GMMA constraints, using default [128,128,64]\n", 
                     tile_M, tile_N, tile_K);
-            gemm_tn<half_t, half_t, half_t, float, float, 128, 128, 64>(
-                N, M, K, alpha, B, N, A, M, beta, C, M, stream);
+            gemm_nt<half_t, half_t, half_t, float, float, 128, 128, 64>(
+                M, N, K, alpha, A, M, B, N, beta, C, M, stream);
         }
     } else {
         fprintf(stderr, "ERROR: Invalid storage format combination: lhs=%c, rhs=%c\n", 

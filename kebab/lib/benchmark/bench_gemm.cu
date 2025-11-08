@@ -92,12 +92,12 @@ bool verifyGEMM(const T* A, const T* B, const T* C_test, int M, int N, int K,
     
     if constexpr (std::is_same_v<T, float>) {
         const float alpha = 1.0f, beta = 0.0f;
-        cublasSgemm(handle, config.opB, config.opA, N, M, K,
-                    &alpha, B, config.ldB, A, config.ldA, &beta, d_C_ref, config.ldC);
+        cublasSgemm(handle, config.opA, config.opB, M, N, K,
+                    &alpha, A, config.ldA, B, config.ldB, &beta, d_C_ref, config.ldC);
     } else if constexpr (std::is_same_v<T, __half>) {
         const __half alpha = __float2half(1.0f), beta = __float2half(0.0f);
-        cublasHgemm(handle, config.opB, config.opA, N, M, K,
-                    &alpha, B, config.ldB, A, config.ldA, &beta, d_C_ref, config.ldC);
+        cublasHgemm(handle, config.opA, config.opB, M, N, K,
+                    &alpha, A, config.ldA, B, config.ldB, &beta, d_C_ref, config.ldC);
     }
     
     cublasDestroy(handle);
@@ -286,12 +286,12 @@ void benchmarkGEMM(const ConfigParser& config) {
             auto cublas_kernel = [&]() {
                 if constexpr (std::is_same_v<T, float>) {
                     const float alpha = 1.0f, beta = 0.0f;
-                    cublasSgemm(handle, config.opB, config.opA, N, M, K,
-                                &alpha, d_B, config.ldB, d_A, config.ldA, &beta, d_C, config.ldC);
+                    cublasSgemm(handle, config.opA, config.opB, M, N, K,
+                                &alpha, d_A, config.ldA, d_B, config.ldB, &beta, d_C, config.ldC);
                 } else {
                     const __half alpha = __float2half(1.0f), beta = __float2half(0.0f);
-                    cublasHgemm(handle, config.opB, config.opA, N, M, K,
-                                &alpha, d_B, config.ldB, d_A, config.ldA, &beta, d_C, config.ldC);
+                    cublasHgemm(handle, config.opA, config.opB, M, N, K,
+                                &alpha, d_A, config.ldA, d_B, config.ldB, &beta, d_C, config.ldC);
                 }
             };
 
@@ -357,12 +357,12 @@ void benchmarkGEMM(const ConfigParser& config) {
             cublasCreate(&handle);
             if constexpr (std::is_same_v<T, float>) {
                 const float alpha = 1.0f, beta = 0.0f;
-                cublasSgemm(handle, config.opB, config.opA, N, M, K,
-                           &alpha, d_B, config.ldB, d_A, config.ldA, &beta, d_C_ref, config.ldC);
+                cublasSgemm(handle, config.opA, config.opB, M, N, K,
+                           &alpha, d_A, config.ldA, d_B, config.ldB, &beta, d_C_ref, config.ldC);
             } else {
                 const __half alpha = __float2half(1.0f), beta = __float2half(0.0f);
-                cublasHgemm(handle, config.opB, config.opA, N, M, K,
-                           &alpha, d_B, config.ldB, d_A, config.ldA, &beta, d_C_ref, config.ldC);
+                cublasHgemm(handle, config.opA, config.opB, M, N, K,
+                           &alpha, d_A, config.ldA, d_B, config.ldB, &beta, d_C_ref, config.ldC);
             }
             cublasDestroy(handle);
             

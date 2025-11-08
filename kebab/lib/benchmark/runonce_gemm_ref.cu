@@ -1,5 +1,6 @@
 #include "kebab/utils/benchmark.h"
 #include "kebab/utils/matrix_init.h"
+#include "kebab/utils/reference_gemm.h"
 #include "kebab/config/config_parser.h"
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
@@ -8,15 +9,17 @@
 #include <random>
 #include <memory>
 #include <iomanip>
+#include <cassert>
+
 
 using namespace kebab::benchmark;
 using namespace kebab::utils;
 using namespace kebab::config;
 
 /**
- * @brief Configure cuBLAS parameters based on storage format
+ * @brief cuBLAS configuration for different matrix storage formats
  */
-struct CublasConfig {
+struct CublasGemmConfig {
     cublasOperation_t opA;
     cublasOperation_t opB;
     int ldA;
@@ -24,13 +27,10 @@ struct CublasConfig {
     int ldC;
 };
 
-inline CublasConfig getCublasConfig(const std::string& opmode, int M, int N, int K) {
-    char lhs_format = (opmode.length() >= 1) ? opmode[0] : 'R';
-    char rhs_format = (opmode.length() >= 2) ? opmode[1] : 'R';
-    
-    CublasConfig config;
+inline CublasGemmConfig getCublasGemmConfig(char lhs_format, char rhs_format, int M, int N, int K) {
+    CublasGemmConfig config;
     config.ldC = M;
-    
+
     if (lhs_format == 'R' && rhs_format == 'R') {
         config.opA = CUBLAS_OP_T;
         config.opB = CUBLAS_OP_T;
@@ -52,7 +52,7 @@ inline CublasConfig getCublasConfig(const std::string& opmode, int M, int N, int
         config.ldA = M;
         config.ldB = K;
     }
-    
+
     return config;
 }
 
@@ -97,8 +97,9 @@ void runOnceGEMMRef(const ConfigParser& config) {
     int M = size, N = size, K = size;
     
     // Parse opmode to determine storage formats
-    char lhs_format = (opmode.length() >= 1) ? opmode[0] : 'R';
-    char rhs_format = (opmode.length() >= 2) ? opmode[1] : 'R';
+    assert(opmode.length() >= 2);
+    char lhs_format = opmode[0];
+    char rhs_format = opmode[1];
     
     int A_storage_rows = (lhs_format == 'R') ? M : K;
     int A_storage_cols = (lhs_format == 'R') ? K : M;
@@ -121,9 +122,19 @@ void runOnceGEMMRef(const ConfigParser& config) {
     std::vector<T> h_C(M * N);
     
     // Initialize matrices
-    std::mt19937 gen(42);
-    initializeMatrix(h_A.data(), M, K, init_A, gen, lhs_format);
-    initializeMatrix(h_B.data(), K, N, init_B, gen, rhs_format);
+    // For small matrices, use magic values for verification
+    if (M <= 4 && N <= 4 && K <= 4) {
+        std::cout << "Using magic values for verification" << std::endl;
+        initMagicMatrix(h_A.data(), M, K, lhs_format);
+        initMagicMatrix(h_B.data(), K, N, rhs_format);
+        printf("Input matrices:\n");
+        printMatrix(h_A.data(), M, K, lhs_format, "A");
+        printMatrix(h_B.data(), K, N, rhs_format, "B");
+    } else {
+        std::mt19937 gen(42);
+        initializeMatrix(h_A.data(), M, K, init_A, gen, lhs_format);
+        initializeMatrix(h_B.data(), K, N, init_B, gen, rhs_format);
+    }
     std::fill(h_C.begin(), h_C.end(), T{0});
     
     // Allocate device memory
@@ -137,35 +148,83 @@ void runOnceGEMMRef(const ConfigParser& config) {
     CUDA_CHECK(cudaMemcpy(d_B, h_B.data(), B_storage_rows * B_storage_cols * sizeof(T), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemset(d_C, 0, M * N * sizeof(T)));
     
+    // Run C++ reference GEMM for verification (only for small matrices)
+    std::vector<T> h_C_cpp_ref(M * N, T{0});
+    if (M <= 4 && N <= 4 && K <= 4) {
+        std::cout << "\nRunning C++ reference GEMM for verification..." << std::endl;
+        std::vector<T> h_A_verify(A_storage_rows * A_storage_cols);
+        std::vector<T> h_B_verify(B_storage_rows * B_storage_cols);
+
+        CUDA_CHECK(cudaMemcpy(h_A_verify.data(), d_A, A_storage_rows * A_storage_cols * sizeof(T), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(h_B_verify.data(), d_B, B_storage_rows * B_storage_cols * sizeof(T), cudaMemcpyDeviceToHost));
+
+        referenceGemmCpp<T>(h_A_verify.data(), h_B_verify.data(), h_C_cpp_ref.data(),
+                            M, N, K, lhs_format, rhs_format, true);
+
+        std::cout << "\nC++ Reference Result (col-major storage):" << std::endl;
+        printMatrix(h_C_cpp_ref.data(), M, N, 'C', "C_cpp_ref");
+    } else {
+        std::cout << "\nSkipping C++ reference verification (matrix too large: " << M << "x" << N << "x" << K << ")" << std::endl;
+    }
+
+    // Synchronize before profiling
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    std::cout << "\nRunning cuBLAS reference kernel once..." << std::endl;
+
     // Get cuBLAS configuration
-    auto config_cublas = getCublasConfig(opmode, M, N, K);
-    
+    auto config_cublas = getCublasGemmConfig(lhs_format, rhs_format, M, N, K);
+
     // Create cuBLAS handle
     cublasHandle_t handle;
     cublasCreate(&handle);
-    
-    // Synchronize before profiling
-    CUDA_CHECK(cudaDeviceSynchronize());
-    
-    std::cout << "Running cuBLAS kernel once..." << std::endl;
-    
+
     // Run cuBLAS kernel exactly once (no loops, no warmup)
     if constexpr (std::is_same_v<T, float>) {
         const float alpha = 1.0f, beta = 0.0f;
-        cublasSgemm(handle, config_cublas.opB, config_cublas.opA, N, M, K,
-                    &alpha, d_B, config_cublas.ldB, d_A, config_cublas.ldA, &beta, d_C, config_cublas.ldC);
+        cublasSgemm(handle, config_cublas.opA, config_cublas.opB, M, N, K,
+                    &alpha, d_A, config_cublas.ldA, d_B, config_cublas.ldB, &beta, d_C, config_cublas.ldC);
     } else {
         const __half alpha = __float2half(1.0f), beta = __float2half(0.0f);
-        cublasHgemm(handle, config_cublas.opB, config_cublas.opA, N, M, K,
-                    &alpha, d_B, config_cublas.ldB, d_A, config_cublas.ldA, &beta, d_C, config_cublas.ldC);
+        cublasHgemm(handle, config_cublas.opA, config_cublas.opB, M, N, K,
+                    &alpha, d_A, config_cublas.ldA, d_B, config_cublas.ldB, &beta, d_C, config_cublas.ldC);
     }
-    
+
     // Synchronize after kernel
     CUDA_CHECK(cudaDeviceSynchronize());
-    
-    std::cout << "cuBLAS kernel execution complete!" << std::endl;
+
+    std::cout << "cuBLAS reference kernel execution complete!" << std::endl;
+
+    // Verify cuBLAS result against C++ reference (only for small matrices)
+    if (M <= 4 && N <= 4 && K <= 4) {
+        std::cout << "\nVerifying cuBLAS result against C++ reference..." << std::endl;
+        std::vector<T> h_C_cublas(M * N);
+        CUDA_CHECK(cudaMemcpy(h_C_cublas.data(), d_C, M * N * sizeof(T), cudaMemcpyDeviceToHost));
+
+        std::cout << "\ncuBLAS Result (col-major storage):" << std::endl;
+        printMatrix(h_C_cublas.data(), M, N, 'C', "C_cublas");
+
+        // Compare results (allow small tolerance for float16 precision)
+        bool all_match = true;
+        float max_diff = 0.0f;
+        float tolerance = (std::is_same_v<T, __half>) ? 1.0f : 1e-5f;  // Higher tolerance for float16
+
+        for (int i = 0; i < M * N; ++i) {
+            float diff = std::abs((float)h_C_cublas[i] - (float)h_C_cpp_ref[i]);
+            max_diff = std::max(max_diff, diff);
+            if (diff > tolerance) {
+                all_match = false;
+                printf("Mismatch at index %d: cuBLAS=%.2f, C++_ref=%.2f, diff=%.2f\n",
+                       i, (float)h_C_cublas[i], (float)h_C_cpp_ref[i], diff);
+            }
+        }
+
+        printf("\nVerification Result: %s (max_diff=%.6f, tolerance=%.6f)\n",
+               all_match ? "PASS" : "FAIL", max_diff, tolerance);
+    }
+
     std::cout << "Ready for profiling analysis." << std::endl;
-    
+
     // Cleanup
     cublasDestroy(handle);
     CUDA_CHECK(cudaFree(d_A));

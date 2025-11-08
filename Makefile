@@ -292,6 +292,10 @@ help:
 	@$(foreach op,$(OPERATORS_TGT),echo "  make tune-$(op)-ref";)
 	@echo "  make tune-all           - Profile all operators with ncu"
 	@echo ""
+	@echo "Debug/Run targets (for development):"
+	@$(foreach op,$(OPERATORS_TGT),echo "  make run-$(op)";)
+	@$(foreach op,$(OPERATORS_TGT),echo "  make run-$(op)-ref";)
+	@echo ""
 	@echo "Report targets:"
 	@echo "  make report             - Generate text reports from NCU profiles (Details page)"
 	@echo "=========================================="
@@ -703,6 +707,26 @@ tune-all:
 	@echo "=========================================="
 
 # ============================================================================
+# Debug/Run Targets (Auto-generated from OPERATORS list)
+# ============================================================================
+
+# Generate run targets for each operator (for development/debugging)
+$(addprefix run-,$(OPERATORS_TGT)): run-%: build
+	@echo "=========================================="
+	@echo "Running $(subst -,_,$*) Kernel (Single Run)"
+	@echo "=========================================="
+	@$(BUILD_DIR)/lib/benchmark/runonce_$(subst -,_,$*)
+	@echo "=========================================="
+
+# Generate run-ref targets for reference implementations
+$(addprefix run-,$(addsuffix -ref,$(OPERATORS_TGT))): run-%-ref: build
+	@echo "=========================================="
+	@echo "Running $(subst -ref,,$(subst -,_,$*)) Reference Kernel (Single Run)"
+	@echo "=========================================="
+	@$(BUILD_DIR)/lib/benchmark/runonce_$(subst -ref,,$(subst -,_,$*))_ref
+	@echo "=========================================="
+
+# ============================================================================
 # Report Generation Target - Extract Summary and Details from NCU reports
 # ============================================================================
 report:
@@ -719,25 +743,51 @@ report:
 		exit 1; \
 	fi; \
 	COUNT=0; \
+	SKIPPED=0; \
 	for ncu_file in $$NCU_FILES; do \
 		base_name=$$(basename "$$ncu_file" .ncu-rep); \
 		report_file="reports/$${base_name}_report.txt"; \
-		echo "  Exporting: $$base_name"; \
-		/usr/local/cuda-12.8/bin/ncu --import "$$ncu_file" --page details > "$$report_file" 2>&1; \
-		if [ -s "$$report_file" ]; then \
-			echo "    ✓ $$report_file"; \
+		if [ -f "$$report_file" ]; then \
+			echo "  Skipping: $$base_name (report already exists)"; \
+			SKIPPED=$$((SKIPPED + 1)); \
 		else \
-			echo "    ✗ Failed to generate report"; \
-			rm -f "$$report_file"; \
+			echo "  Exporting: $$base_name"; \
+			NCU_BIN=$$(which ncu 2>/dev/null || which nv-nsight-cu-cli 2>/dev/null); \
+			if [ -z "$$NCU_BIN" ]; then \
+				for base_path in /usr/local/cuda-* /opt/nvidia/nsight-compute /usr/local/cuda; do \
+					if [ -d "$$base_path" ]; then \
+						for ncu_path in $$base_path/bin/ncu $$base_path/nsight-compute*/ncu $$base_path/nsight-compute/ncu; do \
+							if [ -x "$$ncu_path" ]; then \
+								NCU_BIN="$$ncu_path"; \
+								break 2; \
+							fi; \
+						done; \
+					fi; \
+				done; \
+			fi; \
+			if [ -z "$$NCU_BIN" ] || [ ! -x "$$NCU_BIN" ]; then \
+				echo "    ✗ NCU not found, skipping"; \
+				continue; \
+			fi; \
+			$$NCU_BIN --import "$$ncu_file" --page details > "$$report_file" 2>&1; \
+			if [ -s "$$report_file" ]; then \
+				echo "    ✓ $$report_file"; \
+				COUNT=$$((COUNT + 1)); \
+			else \
+				echo "    ✗ Failed to generate report"; \
+				rm -f "$$report_file"; \
+			fi; \
 		fi; \
-		COUNT=$$((COUNT + 1)); \
 	done; \
 	echo ""; \
 	echo "=========================================="
 	@echo "Report Generation Complete!"
 	@echo "=========================================="
-	@echo "Generated reports:"
-	@ls -lh reports/*.txt 2>/dev/null || echo "  No reports generated"
+	@echo "Generated: $$COUNT new report(s)"
+	@echo "Skipped: $$SKIPPED existing report(s)"
+	@echo ""
+	@echo "All reports:"
+	@ls -lh reports/*.txt 2>/dev/null || echo "  No reports found"
 	@echo "=========================================="
 
 # ============================================================================
