@@ -236,7 +236,7 @@ gemm_nt_tma(int m, int n, int k,
 
   int smem_size = int(sizeof(SharedStorageTMA<TA, TB, decltype(sA), decltype(sB)>));
   dim3 dimBlock(size(tiled_mma));
-  dim3 dimCluster(2, 2, 1);
+  dim3 dimCluster(2, 1, 1);
   dim3 dimGrid(round_up(size(ceil_div(m, bM)), dimCluster.x),
                round_up(size(ceil_div(n, bN)), dimCluster.y));
   cutlass::ClusterLaunchParams params = {dimGrid, dimBlock, dimCluster, smem_size};
@@ -287,7 +287,7 @@ gemm_tn_tma(int m, int n, int k,
   auto dA = make_stride(ldA, Int<1>{});
   // dB = (N, K):(ldB, 1), treated as row-major for TMA
   auto dB = make_stride(ldB, Int<1>{});
-  // C is col-major (M×N):(1, ldC)
+  // C is col-major (M×N):(1, ldC) - same as NT
   auto dC = make_stride(Int<1>{}, ldC);
 
   // Define CTA tile sizes (static) - now configurable via template parameters
@@ -315,7 +315,7 @@ gemm_tn_tma(int m, int n, int k,
   int smem_size = int(sizeof(SharedStorageTMA<TA, TB, decltype(sA), decltype(sB)>));
   // threads needed to do this wgmma
   dim3 dimBlock(size(tiled_mma));
-  dim3 dimCluster(2, 2, 1);
+  dim3 dimCluster(2, 1, 1);
   dim3 dimGrid(round_up(size(ceil_div(m, bM)), dimCluster.x),
                round_up(size(ceil_div(n, bN)), dimCluster.y));
   cutlass::ClusterLaunchParams params = {dimGrid, dimBlock, dimCluster, smem_size};

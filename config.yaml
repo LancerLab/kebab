@@ -76,7 +76,7 @@ operators:
     # - RC: A is row-major, B is column-major
     # - CR: A is column-major, B is row-major
     # - CC: Both A and B are column-major
-    modes: [RC, CR]
+    modes: [CR, RC]
     # Precision: float32, float16
     precisions: [float16]
     # Tile sizes (for tuning): [M, N, K]
@@ -87,7 +87,7 @@ operators:
     #   [128, 256, 64] - Large N dimension
     # Note: Other K values (e.g., 32) are NOT supported and will fall back to default
     tile_sizes: [128, 128, 64]
-    verbose: false
+    verbose: true
     
   fft:
     enabled: false
