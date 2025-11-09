@@ -18,6 +18,7 @@ set_target_properties(kebab_cuda PROPERTIES CUDA_ARCHITECTURES OFF)
 add_library(kebab_cute
     cute/cute_gemm_wgmma.cu
     cute/cute_gemm_wgmma_tma.cu
+    cute/cute_gemm_wgmma_tma_v3.cu
     cute/cute_gemm.cu
     cute/cute_elementwise_add.cu
 )

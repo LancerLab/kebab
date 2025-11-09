@@ -112,9 +112,22 @@ void gemm_wgmma_tma_fp16_dispatch(const void* A, const void* B, void* C,
 
 // Version 2 with config support
 void gemm_wgmma_tma_fp16(const void* A, const void* B, void* C,
-                         int M, int N, int K, 
+                         int M, int N, int K,
                          char lhs_format, char rhs_format,
                          cudaStream_t stream);
+
+// Version 3: Optimized multi-stage pipeline with TMA
+void gemm_wgmma_tma_v3_fp16_dispatch(const void* A, const void* B, void* C,
+                                     int M, int N, int K,
+                                     char lhs_format, char rhs_format,
+                                     int tile_M, int tile_N, int tile_K,
+                                     cudaStream_t stream);
+
+// Version 3 with config support
+void gemm_wgmma_tma_v3_fp16(const void* A, const void* B, void* C,
+                            int M, int N, int K,
+                            char lhs_format, char rhs_format,
+                            cudaStream_t stream);
 
 
 } // namespace cute

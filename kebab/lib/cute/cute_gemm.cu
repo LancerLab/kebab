@@ -162,12 +162,18 @@ void gemm<__half>(const __half* A, const __half* B, __half* C,
             // Version 2: WGMMA with TMA with configurable tile sizes
             gemm_wgmma_tma_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
             break;
+        case 3:
+            // Version 3: Optimized multi-stage pipeline with TMA
+            gemm_wgmma_tma_v3_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            break;
         default:
             fprintf(stderr, "ERROR: Unsupported CuTe version %d for half\n", version);
-            fprintf(stderr, "       Available versions: 1 (WGMMA without TMA), 2 (WGMMA with TMA)\n");
+            fprintf(stderr, "       Available versions: 1 (WGMMA without TMA), 2 (WGMMA with TMA), 3 (Optimized Pipeline)\n");
             exit(EXIT_FAILURE);
     }
 }
+
+
 
 } // namespace cute
 } // namespace kebab
