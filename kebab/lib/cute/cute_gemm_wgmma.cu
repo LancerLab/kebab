@@ -310,8 +310,9 @@ gemm_nn(int m, int n, int k,
   auto prob_shape = make_shape(M, N, K);                     // (M, N, K)
 
   // Define NN strides (both row-major)
+  // RR mode: A is row-major (M×K), B is row-major (K×N) but we need (N×K)
   auto dA = make_stride(ldA, Int<1>{});                      // (dM, dK) - A row-major: A[m,k] = A[m*K + k]
-  auto dB = make_stride(ldB, Int<1>{});                      // (dK, dN) - B row-major: B[k,n] = B[k*N + n]
+  auto dB = make_stride(Int<1>{}, ldB);                      // (dN, dK) - B viewed as (N,K) col-major: B[n,k] = B[k*N + n]
   auto dC = make_stride(Int<1>{}, ldC);                      // (dM, dN)
 
   // Define CTA tile sizes (static) - now configurable via template parameters
@@ -322,13 +323,16 @@ gemm_nn(int m, int n, int k,
   auto bP = Int<3>{};  // Pipeline
 
   // Define the smem layouts (static)
+  // RR mode: A is row-major (K-major like RC's A), B is row-major (MN-major like CR's B)
   auto sA = tile_to_shape(GMMA::Layout_K_SW128_Atom<TA>{}, make_shape(bM,bK,bP));
   auto sB = tile_to_shape(GMMA::Layout_MN_SW128_Atom<TB>{}, make_shape(bN,bK,bP));
 
   // Define the thread layouts (static)
+  // A: K-major layout (same as RC's A)
   TiledCopy copyA = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, TA>{},
                                     Layout<Shape<_16,_8>,Stride<_8,_1>>{}, // Thr layout 16x8 k-major
                                     Layout<Shape< _1,_8>>{});              // Val layout  1x8
+  // B: MN-major layout (same as CR's B)
   TiledCopy copyB = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, TB>{},
                                     Layout<Shape<_16,_8>>{}, // Thr layout 16x8 n-major
                                     Layout<Shape< _8,_1>>{});// Val layout  8x1
@@ -391,8 +395,9 @@ gemm_tt(int m, int n, int k,
   auto prob_shape = make_shape(M, N, K);                     // (M, N, K)
 
   // Define TT strides (both col-major)
-  auto dA = make_stride(Int<1>{}, ldA);                      // (dM, dK) - A^T col-major
-  auto dB = make_stride(Int<1>{}, ldB);                      // (dK, dN) - B^T col-major
+  // CC mode: A is col-major (M×K), B is col-major (K×N) but we need (N×K)
+  auto dA = make_stride(Int<1>{}, ldA);                      // (dM, dK) - A col-major
+  auto dB = make_stride(ldB, Int<1>{});                      // (dN, dK) - B viewed as (N,K) row-major: B[n,k] = B[k + n*K]
   auto dC = make_stride(Int<1>{}, ldC);                      // (dM, dN)
 
   // Define CTA tile sizes (static) - now configurable via template parameters
@@ -403,18 +408,21 @@ gemm_tt(int m, int n, int k,
   auto bP = Int<3>{};  // Pipeline
 
   // Define the smem layouts (static)
+  // CC mode: A is col-major (MN-major like CR's A), B is col-major (K-major like RC's B)
   auto sA = tile_to_shape(GMMA::Layout_MN_SW128_Atom<TA>{}, make_shape(bM,bK,bP));
-  auto sB = tile_to_shape(GMMA::Layout_MN_SW128_Atom<TB>{}, make_shape(bN,bK,bP));
+  auto sB = tile_to_shape(GMMA::Layout_K_SW128_Atom<TB>{}, make_shape(bN,bK,bP));
 
   // Define the thread layouts (static)
+  // A: MN-major layout (same as CR's A)
   TiledCopy copyA = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, TA>{},
                                     Layout<Shape<_16,_8>>{}, // Thr layout 16x8 m-major
                                     Layout<Shape< _8,_1>>{});// Val layout  8x1
+  // B: K-major layout (same as RC's B)
   TiledCopy copyB = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, TB>{},
-                                    Layout<Shape<_16,_8>>{}, // Thr layout 16x8 n-major
-                                    Layout<Shape< _8,_1>>{});// Val layout  8x1
+                                    Layout<Shape<_16,_8>,Stride<_8,_1>>{}, // Thr layout 16x8 k-major
+                                    Layout<Shape< _1,_8>>{});              // Val layout  1x8
 
-  TiledMMA tiled_mma = make_tiled_mma(SM90_64x64x16_F16F16F16_SS<GMMA::Major::MN,GMMA::Major::MN>{});
+  TiledMMA tiled_mma = make_tiled_mma(SM90_64x64x16_F16F16F16_SS<GMMA::Major::MN,GMMA::Major::K>{});
 
   //
   // Setup and Launch
@@ -671,8 +679,54 @@ void gemm_wgmma_fp16_dispatch(const void* A_ptr, const void* B_ptr, void* C_ptr,
             gemm_nt<half_t, half_t, half_t, float, float, 128, 128, 64>(
                 M, N, K, alpha, A, M, B, N, beta, C, M, stream);
         }
+    } else if (lhs_format == 'R' && rhs_format == 'R') {
+        // RR mode: A row-major, B row-major -> use NN layout
+        // Dispatch based on tile configuration
+        if (tile_M == 128 && tile_N == 128 && tile_K == 64) {
+            gemm_nn<half_t, half_t, half_t, float, float, 128, 128, 64>(
+                M, N, K, alpha, A, K, B, N, beta, C, M, stream);
+        } else if (tile_M == 256 && tile_N == 128 && tile_K == 64) {
+            gemm_nn<half_t, half_t, half_t, float, float, 256, 128, 64>(
+                M, N, K, alpha, A, K, B, N, beta, C, M, stream);
+        } else if (tile_M == 128 && tile_N == 256 && tile_K == 64) {
+            gemm_nn<half_t, half_t, half_t, float, float, 128, 256, 64>(
+                M, N, K, alpha, A, K, B, N, beta, C, M, stream);
+        } else {
+            if (tile_K != 64) {
+                fprintf(stderr, "Warning: Tile K=%d not supported (must be 64), using default [128,128,64]\n",
+                        tile_K);
+            } else {
+                fprintf(stderr, "Warning: Tile size [%d,%d,%d] not supported, using default [128,128,64]\n",
+                        tile_M, tile_N, tile_K);
+            }
+            gemm_nn<half_t, half_t, half_t, float, float, 128, 128, 64>(
+                M, N, K, alpha, A, K, B, N, beta, C, M, stream);
+        }
+    } else if (lhs_format == 'C' && rhs_format == 'C') {
+        // CC mode: A column-major, B column-major -> use TT layout
+        // Dispatch based on tile configuration
+        if (tile_M == 128 && tile_N == 128 && tile_K == 64) {
+            gemm_tt<half_t, half_t, half_t, float, float, 128, 128, 64>(
+                M, N, K, alpha, A, M, B, K, beta, C, M, stream);
+        } else if (tile_M == 256 && tile_N == 128 && tile_K == 64) {
+            gemm_tt<half_t, half_t, half_t, float, float, 256, 128, 64>(
+                M, N, K, alpha, A, M, B, K, beta, C, M, stream);
+        } else if (tile_M == 128 && tile_N == 256 && tile_K == 64) {
+            gemm_tt<half_t, half_t, half_t, float, float, 128, 256, 64>(
+                M, N, K, alpha, A, M, B, K, beta, C, M, stream);
+        } else {
+            if (tile_K != 64) {
+                fprintf(stderr, "Warning: Tile K=%d not supported (must be 64), using default [128,128,64]\n",
+                        tile_K);
+            } else {
+                fprintf(stderr, "Warning: Tile size [%d,%d,%d] not supported, using default [128,128,64]\n",
+                        tile_M, tile_N, tile_K);
+            }
+            gemm_tt<half_t, half_t, half_t, float, float, 128, 128, 64>(
+                M, N, K, alpha, A, M, B, K, beta, C, M, stream);
+        }
     } else {
-        fprintf(stderr, "ERROR: Invalid storage format combination: lhs=%c, rhs=%c\n", 
+        fprintf(stderr, "ERROR: Invalid storage format combination: lhs=%c, rhs=%c\n",
                 lhs_format, rhs_format);
     }
 }

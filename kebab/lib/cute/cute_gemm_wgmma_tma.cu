@@ -365,6 +365,170 @@ gemm_tn_tma(int m, int n, int k,
   CUTE_CHECK_LAST();
 }
 
+// TT GEMM with TMA (RR mode: both A and B are row-major)
+template <class TA, class TB, class TC,
+          class Alpha, class Beta,
+          int BLK_M = 128, int BLK_N = 128, int BLK_K = 64>
+void
+gemm_tt_tma(int m, int n, int k,
+            Alpha alpha,
+            TA const* A, int ldA,
+            TB const* B, int ldB,
+            Beta beta,
+            TC      * C, int ldC,
+            cudaStream_t stream = 0)
+{
+  auto M = int(m);
+  auto N = int(n);
+  auto K = int(k);
+  auto prob_shape = make_shape(M, N, K);
+
+  // For TT (RR mode): A is row-major (M×K), B is row-major (K×N)
+  // RR mode: A is row-major (K-major like RC's A), B is row-major (K×N) but viewed as (N×K) col-major (MN-major like CR's B)
+  auto dA = make_stride(ldA, Int<1>{});  // (ldA, 1) - row-major A (M,K)
+  auto dB = make_stride(Int<1>{}, ldB);  // (1, ldB) - B viewed as (N,K) col-major: B[n,k] = B[k*N + n]
+  auto dC = make_stride(Int<1>{}, ldC);  // (1, ldC) - col-major C (M,N)
+
+  // Define CTA tile sizes
+  auto bM = Int<BLK_M>{};
+  auto bN = Int<BLK_N>{};
+  auto bK = Int<BLK_K>{};
+  auto cta_tiler = make_shape(bM, bN, bK);
+  auto bP = Int<3>{};
+
+  // RR mode: A uses K-major (like RC's A), B uses MN-major (like CR's B)
+  auto sA = tile_to_shape(GMMA::Layout_K_SW128_Atom<TA>{}, make_shape(bM,bK,bP));
+  auto sB = tile_to_shape(GMMA::Layout_MN_SW128_Atom<TB>{}, make_shape(bN,bK,bP));
+
+  TiledMMA tiled_mma = make_tiled_mma(SM90_64x64x16_F16F16F16_SS<GMMA::Major::K,GMMA::Major::MN>{});
+
+  Tensor mA = make_tensor(A, make_shape(M,K), dA);
+  Tensor mB = make_tensor(B, make_shape(N,K), dB);
+
+  Copy_Atom tmaA = make_tma_atom(SM90_TMA_LOAD{}, mA, sA(_,_,0), make_shape(bM,bK));
+  Copy_Atom tmaB = make_tma_atom(SM90_TMA_LOAD{}, mB, sB(_,_,0), make_shape(bN,bK));
+
+  int smem_size = int(sizeof(SharedStorageTMA<TA, TB, decltype(sA), decltype(sB)>));
+  dim3 dimBlock(size(tiled_mma));
+
+  // Calculate required grid size
+  int grid_m = size(ceil_div(m, bM));
+  int grid_n = size(ceil_div(n, bN));
+
+  // Adjust cluster size based on grid size to avoid over-allocation
+  dim3 dimCluster(
+    (grid_m >= 2) ? 2 : 1,
+    (grid_n >= 2) ? 2 : 1,
+    1
+  );
+
+  dim3 dimGrid(round_up(grid_m, dimCluster.x),
+               round_up(grid_n, dimCluster.y));
+  cutlass::ClusterLaunchParams params = {dimGrid, dimBlock, dimCluster, smem_size};
+
+  void const* kernel_ptr = reinterpret_cast<void const*>(
+                              &gemm_device_tma<decltype(prob_shape), decltype(cta_tiler),
+                                               TA, decltype(sA), decltype(tmaA),
+                                               TB, decltype(sB), decltype(tmaB),
+                                               TC, decltype(dC), decltype(tiled_mma),
+                                               decltype(alpha), decltype(beta)>);
+
+  CUTE_CHECK_ERROR(cudaFuncSetAttribute(
+    kernel_ptr,
+    cudaFuncAttributeMaxDynamicSharedMemorySize,
+    smem_size));
+
+  cutlass::Status status = cutlass::launch_kernel_on_cluster(params, kernel_ptr,
+                                                             prob_shape, cta_tiler,
+                                                             A, tmaA,
+                                                             B, tmaB,
+                                                             C, dC, tiled_mma,
+                                                             alpha, beta);
+  CUTE_CHECK_LAST();
+}
+
+// NN GEMM with TMA (CC mode: both A and B are col-major)
+template <class TA, class TB, class TC,
+          class Alpha, class Beta,
+          int BLK_M = 128, int BLK_N = 128, int BLK_K = 64>
+void
+gemm_nn_tma(int m, int n, int k,
+            Alpha alpha,
+            TA const* A, int ldA,
+            TB const* B, int ldB,
+            Beta beta,
+            TC      * C, int ldC,
+            cudaStream_t stream = 0)
+{
+  auto M = int(m);
+  auto N = int(n);
+  auto K = int(k);
+  auto prob_shape = make_shape(M, N, K);
+
+  // For NN (CC mode): A is col-major (M×K), B is col-major (K×N)
+  // CC mode: A is col-major (MN-major like CR's A), B is col-major (K×N) but viewed as (N×K) row-major (K-major like RC's B)
+  auto dA = make_stride(Int<1>{}, ldA);  // (1, ldA) - col-major A (M,K)
+  auto dB = make_stride(ldB, Int<1>{});  // (ldB, 1) - B viewed as (N,K) row-major: B[n,k] = B[k + n*K]
+  auto dC = make_stride(Int<1>{}, ldC);  // (1, ldC) - col-major C (M,N)
+
+  // Define CTA tile sizes
+  auto bM = Int<BLK_M>{};
+  auto bN = Int<BLK_N>{};
+  auto bK = Int<BLK_K>{};
+  auto cta_tiler = make_shape(bM, bN, bK);
+  auto bP = Int<3>{};
+
+  // CC mode: A uses MN-major (like CR's A), B uses K-major (like RC's B)
+  auto sA = tile_to_shape(GMMA::Layout_MN_SW128_Atom<TA>{}, make_shape(bM,bK,bP));
+  auto sB = tile_to_shape(GMMA::Layout_K_SW128_Atom<TB>{}, make_shape(bN,bK,bP));
+
+  TiledMMA tiled_mma = make_tiled_mma(SM90_64x64x16_F16F16F16_SS<GMMA::Major::MN,GMMA::Major::K>{});
+
+  Tensor mA = make_tensor(A, make_shape(M,K), dA);
+  Tensor mB = make_tensor(B, make_shape(N,K), dB);
+
+  Copy_Atom tmaA = make_tma_atom(SM90_TMA_LOAD{}, mA, sA(_,_,0), make_shape(bM,bK));
+  Copy_Atom tmaB = make_tma_atom(SM90_TMA_LOAD{}, mB, sB(_,_,0), make_shape(bN,bK));
+
+  int smem_size = int(sizeof(SharedStorageTMA<TA, TB, decltype(sA), decltype(sB)>));
+  dim3 dimBlock(size(tiled_mma));
+
+  // Calculate required grid size
+  int grid_m = size(ceil_div(m, bM));
+  int grid_n = size(ceil_div(n, bN));
+
+  // Adjust cluster size based on grid size to avoid over-allocation
+  dim3 dimCluster(
+    (grid_m >= 2) ? 2 : 1,
+    (grid_n >= 2) ? 2 : 1,
+    1
+  );
+
+  dim3 dimGrid(round_up(grid_m, dimCluster.x),
+               round_up(grid_n, dimCluster.y));
+  cutlass::ClusterLaunchParams params = {dimGrid, dimBlock, dimCluster, smem_size};
+
+  void const* kernel_ptr = reinterpret_cast<void const*>(
+                              &gemm_device_tma<decltype(prob_shape), decltype(cta_tiler),
+                                               TA, decltype(sA), decltype(tmaA),
+                                               TB, decltype(sB), decltype(tmaB),
+                                               TC, decltype(dC), decltype(tiled_mma),
+                                               decltype(alpha), decltype(beta)>);
+
+  CUTE_CHECK_ERROR(cudaFuncSetAttribute(
+    kernel_ptr,
+    cudaFuncAttributeMaxDynamicSharedMemorySize,
+    smem_size));
+
+  cutlass::Status status = cutlass::launch_kernel_on_cluster(params, kernel_ptr,
+                                                             prob_shape, cta_tiler,
+                                                             A, tmaA,
+                                                             B, tmaB,
+                                                             C, dC, tiled_mma,
+                                                             alpha, beta);
+  CUTE_CHECK_LAST();
+}
+
 /**
  * @brief WGMMA with TMA dispatch (Version 2) with configurable tile sizes
  */
@@ -432,8 +596,52 @@ void gemm_wgmma_tma_fp16_dispatch(const void* A_ptr, const void* B_ptr, void* C_
             gemm_nt_tma<half_t, half_t, half_t, float, float, 128, 128, 64>(
                 M, N, K, alpha, A, M, B, N, beta, C, M, stream);
         }
+    } else if (lhs_format == 'R' && rhs_format == 'R') {
+        // RR mode: A row-major, B row-major -> use TT layout
+        // Dispatch based on tile configuration
+        if (tile_M == 128 && tile_N == 128 && tile_K == 64) {
+            gemm_tt_tma<half_t, half_t, half_t, float, float, 128, 128, 64>(
+                M, N, K, alpha, A, K, B, N, beta, C, M, stream);
+        } else if (tile_M == 256 && tile_N == 128 && tile_K == 64) {
+            gemm_tt_tma<half_t, half_t, half_t, float, float, 256, 128, 64>(
+                M, N, K, alpha, A, K, B, N, beta, C, M, stream);
+        } else if (tile_M == 128 && tile_N == 256 && tile_K == 64) {
+            gemm_tt_tma<half_t, half_t, half_t, float, float, 128, 256, 64>(
+                M, N, K, alpha, A, K, B, N, beta, C, M, stream);
+        } else {
+            if (tile_K != 64) {
+                fprintf(stderr, "Warning: TMA requires K=64 (got K=%d), using default [128,128,64]\n", tile_K);
+            } else {
+                fprintf(stderr, "Warning: Tile size [%d,%d,%d] not supported by TMA, using default [128,128,64]\n",
+                        tile_M, tile_N, tile_K);
+            }
+            gemm_tt_tma<half_t, half_t, half_t, float, float, 128, 128, 64>(
+                M, N, K, alpha, A, K, B, N, beta, C, M, stream);
+        }
+    } else if (lhs_format == 'C' && rhs_format == 'C') {
+        // CC mode: A column-major, B column-major -> use NN layout
+        // Dispatch based on tile configuration
+        if (tile_M == 128 && tile_N == 128 && tile_K == 64) {
+            gemm_nn_tma<half_t, half_t, half_t, float, float, 128, 128, 64>(
+                M, N, K, alpha, A, M, B, K, beta, C, M, stream);
+        } else if (tile_M == 256 && tile_N == 128 && tile_K == 64) {
+            gemm_nn_tma<half_t, half_t, half_t, float, float, 256, 128, 64>(
+                M, N, K, alpha, A, M, B, K, beta, C, M, stream);
+        } else if (tile_M == 128 && tile_N == 256 && tile_K == 64) {
+            gemm_nn_tma<half_t, half_t, half_t, float, float, 128, 256, 64>(
+                M, N, K, alpha, A, M, B, K, beta, C, M, stream);
+        } else {
+            if (tile_K != 64) {
+                fprintf(stderr, "Warning: TMA requires K=64 (got K=%d), using default [128,128,64]\n", tile_K);
+            } else {
+                fprintf(stderr, "Warning: Tile size [%d,%d,%d] not supported by TMA, using default [128,128,64]\n",
+                        tile_M, tile_N, tile_K);
+            }
+            gemm_nn_tma<half_t, half_t, half_t, float, float, 128, 128, 64>(
+                M, N, K, alpha, A, M, B, K, beta, C, M, stream);
+        }
     } else {
-        fprintf(stderr, "ERROR: Invalid storage format combination for TMA: lhs=%c, rhs=%c\n", 
+        fprintf(stderr, "ERROR: Invalid storage format combination for TMA: lhs=%c, rhs=%c\n",
                 lhs_format, rhs_format);
     }
 }
