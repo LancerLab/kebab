@@ -15,6 +15,7 @@ add_library(kebab_cuda
     cuda/cuda_gemm_v4_warpspec.cu
     cuda/cuda_gemm_v5_persistent.cu
     cuda/cuda_gemm_v6_ptxbarrier.cu
+    cuda/cuda_gemm_v7_cluster.cu
 )
 target_include_directories(kebab_cuda PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(kebab_cuda CUDA::cublas CUDA::cuda_driver)

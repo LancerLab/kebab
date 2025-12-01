@@ -66,9 +66,13 @@ void gemm(const __half* A, const __half* B, __half* C,
             // V6: Persistent kernel + tile scheduling (SM90 Hopper, RC mode only)
             gemm_v6_ptxbarrier_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
             break;
+        case 7:
+            // V7: PTX barriers + 5D TMA (SM90 Hopper, RC mode only)
+            gemm_v7_cluster_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            break;
         default:
             fprintf(stderr, "ERROR: Unsupported CUDA version %d\n", version);
-            fprintf(stderr, "       Available: 1-6\n");
+            fprintf(stderr, "       Available: 1-7\n");
             return;
     }
 }

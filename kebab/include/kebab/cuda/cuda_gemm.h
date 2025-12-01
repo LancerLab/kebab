@@ -84,4 +84,12 @@ void gemm_v6_ptxbarrier_fp16(const __half* A, const __half* B, __half* C,
                               int M, int N, int K, char lhs_format, char rhs_format,
                               cudaStream_t stream);
 
+/**
+ * @brief V7: PTX barriers + 5D TMA (RC mode, SM90 Hopper required)
+ * 128×256×64 tiles, mbarrier instructions, cluster-based async copy
+ */
+void gemm_v7_cluster_fp16(const __half* A, const __half* B, __half* C,
+                          int M, int N, int K, char lhs_format, char rhs_format,
+                          cudaStream_t stream);
+
 } // namespace baseline
