@@ -124,4 +124,12 @@ void gemm_v11_hilbert_fp16(const __half* A, const __half* B, __half* C,
                            int M, int N, int K, char lhs_format, char rhs_format,
                            cudaStream_t stream);
 
+/**
+ * @brief V12: stmatrix + Padded TMA Stores (RC mode, SM90 Hopper required)
+ * Uses stmatrix instruction for efficient shared memory stores with padding
+ */
+void gemm_v12_stmatrix_fp16(const __half* A, const __half* B, __half* C,
+                            int M, int N, int K, char lhs_format, char rhs_format,
+                            cudaStream_t stream);
+
 } // namespace baseline

@@ -86,9 +86,13 @@ void gemm(const __half* A, const __half* B, __half* C,
             // V11: Hilbert Curve Scheduling + TMA Stores (SM90 Hopper, RC mode only)
             gemm_v11_hilbert_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
             break;
+        case 12:
+            // V12: stmatrix + Padded TMA Stores (SM90 Hopper, RC mode only)
+            gemm_v12_stmatrix_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            break;
         default:
             fprintf(stderr, "ERROR: Unsupported CUDA version %d\n", version);
-            fprintf(stderr, "       Available: 1-11\n");
+            fprintf(stderr, "       Available: 1-12\n");
             return;
     }
 }
