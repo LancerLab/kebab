@@ -47,12 +47,20 @@ void gemm(const __half* A, const __half* B, __half* C,
             gemm_v1_warptiling_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
             break;
         case 2:
-            // V2: WGMMA + TMA (future implementation)
-            fprintf(stderr, "ERROR: CUDA V2 (WGMMA+TMA) not yet implemented\n");
-            return;
+            // V2: WGMMA + TMA (SM90 Hopper, RC mode only)
+            gemm_v2_wgmma_tma_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            break;
+        case 3:
+            // V3: Warp Group with larger tiles (SM90 Hopper, RC mode only)
+            gemm_v3_warpgroup_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            break;
+        case 4:
+            // V4: Warp Specialization with multi-stage pipeline (SM90 Hopper, RC mode only)
+            gemm_v4_warpspec_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            break;
         default:
             fprintf(stderr, "ERROR: Unsupported CUDA version %d\n", version);
-            fprintf(stderr, "       Available: 1 (warp tiling)\n");
+            fprintf(stderr, "       Available: 1 (warp tiling), 2 (WGMMA+TMA), 3 (warp group), 4 (warp spec)\n");
             return;
     }
 }
