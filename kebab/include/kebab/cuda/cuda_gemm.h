@@ -92,4 +92,12 @@ void gemm_v7_cluster_fp16(const __half* A, const __half* B, __half* C,
                           int M, int N, int K, char lhs_format, char rhs_format,
                           cudaStream_t stream);
 
+/**
+ * @brief V8: Thread Block Clusters + TMA Multicast (RC mode, SM90 Hopper required)
+ * 128×256×64 tiles, CLUSTER_M=2, CLUSTER_N=1, multicast for shared memory broadcast
+ */
+void gemm_v8_multicast_fp16(const __half* A, const __half* B, __half* C,
+                            int M, int N, int K, char lhs_format, char rhs_format,
+                            cudaStream_t stream);
+
 } // namespace baseline
