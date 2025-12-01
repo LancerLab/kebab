@@ -75,21 +75,22 @@ inline CublasConfig getCublasConfig(const std::string& opmode, int M, int N, int
  * @brief Verify GEMM correctness against cuBLAS reference
  */
 template<typename T>
-bool verifyGEMM(const T* A, const T* B, const T* C_test, int M, int N, int K, 
-                const std::string& opmode, float tolerance = 1e-3f) {
+bool verifyGEMM(const T* A, const T* B, const T* C_test, int M, int N, int K,
+                const std::string& opmode, float tolerance = 1e-3f,
+                bool transpose_compare = false) {
     // Allocate reference result
     std::vector<T> C_ref(M * N);
     T* d_C_ref;
     CUDA_CHECK(cudaMalloc(&d_C_ref, M * N * sizeof(T)));
     CUDA_CHECK(cudaMemset(d_C_ref, 0, M * N * sizeof(T)));
-    
+
     // Run cuBLAS reference
     cublasHandle_t handle;
     cublasCreate(&handle);
-    
+
     // Get cuBLAS configuration based on storage format
     auto config = getCublasConfig(opmode, M, N, K);
-    
+
     if constexpr (std::is_same_v<T, float>) {
         const float alpha = 1.0f, beta = 0.0f;
         cublasSgemm(handle, config.opA, config.opB, M, N, K,
@@ -99,51 +100,60 @@ bool verifyGEMM(const T* A, const T* B, const T* C_test, int M, int N, int K,
         cublasHgemm(handle, config.opA, config.opB, M, N, K,
                     &alpha, A, config.ldA, B, config.ldB, &beta, d_C_ref, config.ldC);
     }
-    
+
     cublasDestroy(handle);
-    
+
     // Copy reference result to host
     CUDA_CHECK(cudaMemcpy(C_ref.data(), d_C_ref, M * N * sizeof(T), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaFree(d_C_ref));
-    
+
     // Copy test result to host
     std::vector<T> C_test_host(M * N);
     CUDA_CHECK(cudaMemcpy(C_test_host.data(), C_test, M * N * sizeof(T), cudaMemcpyDeviceToHost));
-    
+
     // Compare results
+    // If transpose_compare is true:
+    //   - C_test is row-major: C_test[m,n] = C_test[m*N + n]
+    //   - C_ref is col-major: C_ref[m,n] = C_ref[n*M + m]
+    //   So we compare C_test[m*N + n] with C_ref[n*M + m]
     bool correct = true;
     int errors = 0;
     const int max_errors_to_show = 5;
-    
-    for (int i = 0; i < M * N && errors < max_errors_to_show; ++i) {
-        float ref_val, test_val;
-        
-        if constexpr (std::is_same_v<T, float>) {
-            ref_val = C_ref[i];
-            test_val = C_test_host[i];
-        } else {
-            ref_val = __half2float(C_ref[i]);
-            test_val = __half2float(C_test_host[i]);
-        }
-        
-        float abs_error = std::abs(test_val - ref_val);
-        float rel_error = (ref_val != 0.0f) ? abs_error / std::abs(ref_val) : abs_error;
-        
-        if (abs_error > tolerance && rel_error > tolerance) {
-            if (errors == 0) {
-                std::cout << "  Verification errors found:" << std::endl;
+
+    for (int m = 0; m < M && errors < max_errors_to_show; ++m) {
+        for (int n = 0; n < N && errors < max_errors_to_show; ++n) {
+            float ref_val, test_val;
+
+            int test_idx = m * N + n;  // row-major index
+            int ref_idx = transpose_compare ? (n * M + m) : (m * N + n);
+
+            if constexpr (std::is_same_v<T, float>) {
+                ref_val = C_ref[ref_idx];
+                test_val = C_test_host[test_idx];
+            } else {
+                ref_val = __half2float(C_ref[ref_idx]);
+                test_val = __half2float(C_test_host[test_idx]);
             }
-            std::cout << "    Element " << i << ": expected " << ref_val 
-                      << ", got " << test_val << " (error: " << abs_error << ")" << std::endl;
-            errors++;
-            correct = false;
+
+            float abs_error = std::abs(test_val - ref_val);
+            float rel_error = (ref_val != 0.0f) ? abs_error / std::abs(ref_val) : abs_error;
+
+            if (abs_error > tolerance && rel_error > tolerance) {
+                if (errors == 0) {
+                    std::cout << "  Verification errors found:" << std::endl;
+                }
+                std::cout << "    C[" << m << "," << n << "]: expected " << ref_val
+                          << ", got " << test_val << " (error: " << abs_error << ")" << std::endl;
+                errors++;
+                correct = false;
+            }
         }
     }
-    
+
     if (errors >= max_errors_to_show) {
         std::cout << "    ... (showing first " << max_errors_to_show << " errors)" << std::endl;
     }
-    
+
     return correct;
 }
 
@@ -335,8 +345,9 @@ void benchmarkGEMM(const ConfigParser& config) {
             } else {
                 baseline::gemm(d_A, d_B, d_C, M, N, K, opmode.c_str(), version);
             }
-            
-            bool correct = verifyGEMM(d_A, d_B, d_C, M, N, K, opmode, tolerance);
+
+            // Both kernel and cuBLAS output column-major C, no transpose needed
+            bool correct = verifyGEMM(d_A, d_B, d_C, M, N, K, opmode, tolerance, false);
         std::cout << (correct ? "✓ PASSED" : "✗ FAILED") << std::endl;
         
         // Verbose output: show detailed matrix comparison

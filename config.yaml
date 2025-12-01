@@ -54,13 +54,14 @@ operators:
     # GPU device ID to run on (0-based index, -1 for auto-select)
     gpu_id: 0
     # Implementation: cuda (baseline) | cute (CuTe/WGMMA implementation)
-    impl: cute
+    impl: cuda
     # Version: kernel variant ID
-    # cuda version 1: naive implementation (no tiling, no optimization)
+    # cuda version 1: Baseline (naive kernels)
+    # cuda version 2: WGMMA + TMA (based on fast.cu kernel 2)
     # cute version 1: WGMMA without TMA
     # cute version 2: WGMMA with TMA
     # cute version 3: Optimized multi-stage pipeline with TMA
-    version: 3
+    version: 1
     # Initialization method for matrices A and B
     # Format: <A_init>-<B_init>
     # Options: one, rand, range, row, col
@@ -76,7 +77,7 @@ operators:
     # - RC: A is row-major, B is column-major
     # - CR: A is column-major, B is row-major
     # - CC: Both A and B are column-major
-    modes: [RC, CR, RR, CC]
+    modes: [RC]
     # Precision: float32, float16
     precisions: [float16]
     # Tile sizes (for tuning): [M, N, K]
