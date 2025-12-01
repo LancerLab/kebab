@@ -61,7 +61,7 @@ operators:
     # cute version 1: WGMMA without TMA
     # cute version 2: WGMMA with TMA
     # cute version 3: Optimized multi-stage pipeline with TMA
-    version: 8
+    version: 9
     # Initialization method for matrices A and B
     # Format: <A_init>-<B_init>
     # Options: one, rand, range, row, col

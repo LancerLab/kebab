@@ -74,9 +74,13 @@ void gemm(const __half* A, const __half* B, __half* C,
             // V8: Thread Block Clusters + TMA Multicast (SM90 Hopper, RC mode only)
             gemm_v8_multicast_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
             break;
+        case 9:
+            // V9: Streaming Stores + Clusters + TMA Multicast (SM90 Hopper, RC mode only)
+            gemm_v9_streamstore_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            break;
         default:
             fprintf(stderr, "ERROR: Unsupported CUDA version %d\n", version);
-            fprintf(stderr, "       Available: 1-8\n");
+            fprintf(stderr, "       Available: 1-9\n");
             return;
     }
 }

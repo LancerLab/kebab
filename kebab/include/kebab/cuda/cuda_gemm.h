@@ -100,4 +100,12 @@ void gemm_v8_multicast_fp16(const __half* A, const __half* B, __half* C,
                             int M, int N, int K, char lhs_format, char rhs_format,
                             cudaStream_t stream);
 
+/**
+ * @brief V9: Streaming Stores + Clusters + TMA Multicast (RC mode, SM90 Hopper required)
+ * Same as V8 but with __stwt streaming stores for output (bypasses L2 cache)
+ */
+void gemm_v9_streamstore_fp16(const __half* A, const __half* B, __half* C,
+                              int M, int N, int K, char lhs_format, char rhs_format,
+                              cudaStream_t stream);
+
 } // namespace baseline
