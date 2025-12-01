@@ -68,4 +68,12 @@ void gemm_v4_warpspec_fp16(const __half* A, const __half* B, __half* C,
                            int M, int N, int K, char lhs_format, char rhs_format,
                            cudaStream_t stream);
 
+/**
+ * @brief V5: Larger tiles + register optimization (RC mode, SM90 Hopper required)
+ * 128×256×64 tiles, 3 warp-groups (1 producer + 2 consumers), dynamic register allocation
+ */
+void gemm_v5_persistent_fp16(const __half* A, const __half* B, __half* C,
+                             int M, int N, int K, char lhs_format, char rhs_format,
+                             cudaStream_t stream);
+
 } // namespace baseline

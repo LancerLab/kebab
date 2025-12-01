@@ -58,9 +58,13 @@ void gemm(const __half* A, const __half* B, __half* C,
             // V4: Warp Specialization with multi-stage pipeline (SM90 Hopper, RC mode only)
             gemm_v4_warpspec_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
             break;
+        case 5:
+            // V5: Larger tiles + register optimization (SM90 Hopper, RC mode only)
+            gemm_v5_persistent_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            break;
         default:
             fprintf(stderr, "ERROR: Unsupported CUDA version %d\n", version);
-            fprintf(stderr, "       Available: 1 (warp tiling), 2 (WGMMA+TMA), 3 (warp group), 4 (warp spec)\n");
+            fprintf(stderr, "       Available: 1-5\n");
             return;
     }
 }
