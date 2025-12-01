@@ -18,6 +18,7 @@ add_library(kebab_cuda
     cuda/cuda_gemm_v7_cluster.cu
     cuda/cuda_gemm_v8_multicast.cu
     cuda/cuda_gemm_v9_streamstore.cu
+    cuda/cuda_gemm_v10_tmastore.cu
 )
 target_include_directories(kebab_cuda PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(kebab_cuda CUDA::cublas CUDA::cuda_driver)

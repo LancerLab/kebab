@@ -61,13 +61,13 @@ operators:
     # cute version 1: WGMMA without TMA
     # cute version 2: WGMMA with TMA
     # cute version 3: Optimized multi-stage pipeline with TMA
-    version: 9
+    version: 10
     # Initialization method for matrices A and B
     # Format: <A_init>-<B_init>
     # Options: one, rand, range, row, col
     init_method: rand-rand
     # Matrix sizes for benchmarking (M=N=K for square matrices)
-    matrix_sizes: [128, 256, 512, 1024, 2048, 4096]
+    matrix_sizes: [256, 512, 1024, 2048, 4096]
     # Operation modes: specify storage format of LHS and RHS
     # Format: <LHS_format><RHS_format>
     # - R: Row-major storage

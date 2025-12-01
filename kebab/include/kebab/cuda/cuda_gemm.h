@@ -108,4 +108,12 @@ void gemm_v9_streamstore_fp16(const __half* A, const __half* B, __half* C,
                               int M, int N, int K, char lhs_format, char rhs_format,
                               cudaStream_t stream);
 
+/**
+ * @brief V10: TMA Async Stores + Clusters + TMA Multicast (RC mode, SM90 Hopper required)
+ * Uses TMA async stores (cp.async.bulk.tensor.global.shared) for output
+ */
+void gemm_v10_tmastore_fp16(const __half* A, const __half* B, __half* C,
+                            int M, int N, int K, char lhs_format, char rhs_format,
+                            cudaStream_t stream);
+
 } // namespace baseline
