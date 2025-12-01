@@ -116,4 +116,12 @@ void gemm_v10_tmastore_fp16(const __half* A, const __half* B, __half* C,
                             int M, int N, int K, char lhs_format, char rhs_format,
                             cudaStream_t stream);
 
+/**
+ * @brief V11: Hilbert Curve Scheduling + TMA Stores (RC mode, SM90 Hopper required)
+ * Uses Hilbert curve for tile scheduling to improve L2 cache locality
+ */
+void gemm_v11_hilbert_fp16(const __half* A, const __half* B, __half* C,
+                           int M, int N, int K, char lhs_format, char rhs_format,
+                           cudaStream_t stream);
+
 } // namespace baseline
