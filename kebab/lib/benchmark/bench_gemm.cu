@@ -2,6 +2,7 @@
 #include "kebab/cute/gemm.h"
 #include "kebab/utils/matrix_init.h"
 #include "kebab/utils/matrix_print.h"
+#include "kebab/utils/cublas_reference.h"
 #include "kebab/cuda/cuda_gemm.h"
 #include "kebab/config/config_parser.h"
 #include <cuda_runtime.h>
@@ -13,6 +14,7 @@
 #include <memory>
 #include <iomanip>
 #include <sstream>
+#include <algorithm>
 
 // ANSI color codes
 #define COLOR_RESET   "\033[0m"
@@ -27,209 +29,120 @@ using namespace kebab::benchmark;
 using namespace kebab::utils;
 using namespace kebab::config;
 
-/**
- * @brief Configure cuBLAS parameters based on storage format
- */
-struct CublasConfig {
-    cublasOperation_t opA;
-    cublasOperation_t opB;
-    int ldA;
-    int ldB;
-    int ldC;
-};
 
-inline CublasConfig getCublasConfig(const std::string& opmode, int M, int N, int K) {
-    char lhs_format = (opmode.length() >= 1) ? opmode[0] : 'R';
-    char rhs_format = (opmode.length() >= 2) ? opmode[1] : 'R';
-    
-    CublasConfig config;
-    config.ldC = M;  // C is always row-major output (M×N)
-    
-    if (lhs_format == 'R' && rhs_format == 'R') {
-        // RR: Both row-major
-        // A is M×K row-major (ldA=K), B is K×N row-major (ldB=N)
-        // cuBLAS computes: C^T = B^T × A^T
-        config.opA = CUBLAS_OP_T;  // A^T
-        config.opB = CUBLAS_OP_T;  // B^T
-        config.ldA = K;
-        config.ldB = N;
-    } else if (lhs_format == 'R' && rhs_format == 'C') {
-        // RC: A row-major, B column-major
-        // A is M×K row-major (ldA=K), B is K×N column-major (ldB=K)
-        // cuBLAS computes: C^T = B × A^T (B is already transposed in storage)
-        config.opA = CUBLAS_OP_T;  // A^T
-        config.opB = CUBLAS_OP_N;  // B (no transpose needed)
-        config.ldA = K;
-        config.ldB = K;
-    } else if (lhs_format == 'C' && rhs_format == 'R') {
-        // CR: A column-major, B row-major
-        // A is M×K column-major (ldA=M), B is K×N row-major (ldB=N)
-        // cuBLAS computes: C^T = B^T × A (A is already transposed in storage)
-        config.opA = CUBLAS_OP_N;  // A (no transpose needed)
-        config.opB = CUBLAS_OP_T;  // B^T
-        config.ldA = M;
-        config.ldB = N;
-    } else {  // CC
-        // CC: Both column-major
-        // A is M×K column-major (ldA=M), B is K×N column-major (ldB=K)
-        // cuBLAS computes: C^T = B × A (both already transposed in storage)
-        config.opA = CUBLAS_OP_N;  // A (no transpose needed)
-        config.opB = CUBLAS_OP_N;  // B (no transpose needed)
-        config.ldA = M;
-        config.ldB = K;
-    }
-    
-    return config;
-}
 
 /**
- * @brief Verify GEMM correctness against cuBLAS reference
+ * @brief Verify GEMM correctness against cuBLAS reference (wrapper for shared function)
  */
 template<typename T>
 bool verifyGEMM(const T* A, const T* B, const T* C_test, int M, int N, int K,
                 const std::string& opmode, float tolerance = 1e-3f,
-                bool transpose_compare = false) {
-    // Allocate reference result
-    std::vector<T> C_ref(M * N);
-    T* d_C_ref;
-    CUDA_CHECK(cudaMalloc(&d_C_ref, M * N * sizeof(T)));
-    CUDA_CHECK(cudaMemset(d_C_ref, 0, M * N * sizeof(T)));
+                bool /* transpose_compare */ = false) {
+    char lhs_format = (opmode.length() >= 1) ? opmode[0] : 'R';
+    char rhs_format = (opmode.length() >= 2) ? opmode[1] : 'R';
+    // Use shared verification function (verbose=false for benchmark)
+    return verifyCublasGemm(A, B, C_test, M, N, K, lhs_format, rhs_format, tolerance, false);
+}
 
-    // Run cuBLAS reference
-    cublasHandle_t handle;
-    cublasCreate(&handle);
+/**
+ * @brief Helper to format latency with appropriate precision
+ */
+inline std::string formatLatency(float lat) {
+    std::ostringstream ss;
+    if (lat < 0.01f) ss << std::fixed << std::setprecision(4) << lat;
+    else if (lat < 0.1f) ss << std::fixed << std::setprecision(3) << lat;
+    else if (lat < 1.0f) ss << std::fixed << std::setprecision(2) << lat;
+    else ss << std::fixed << std::setprecision(1) << lat;
+    return ss.str();
+}
 
-    // Get cuBLAS configuration based on storage format
-    auto config = getCublasConfig(opmode, M, N, K);
+/**
+ * @brief Repeat a string n times (for UTF-8 box drawing characters)
+ */
+inline std::string repeatStr(const std::string& s, int n) {
+    std::string result;
+    for (int i = 0; i < n; ++i) result += s;
+    return result;
+}
 
-    if constexpr (std::is_same_v<T, float>) {
-        const float alpha = 1.0f, beta = 0.0f;
-        cublasSgemm(handle, config.opA, config.opB, M, N, K,
-                    &alpha, A, config.ldA, B, config.ldB, &beta, d_C_ref, config.ldC);
-    } else if constexpr (std::is_same_v<T, __half>) {
-        const __half alpha = __float2half(1.0f), beta = __float2half(0.0f);
-        cublasHgemm(handle, config.opA, config.opB, M, N, K,
-                    &alpha, A, config.ldA, B, config.ldB, &beta, d_C_ref, config.ldC);
-    } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
-        // BFloat16: use cublasGemmEx with FP32 accumulation (matches fast.cu)
-        const float alpha = 1.0f, beta = 0.0f;
-        cublasGemmEx(handle, config.opA, config.opB, M, N, K,
-                     &alpha, A, CUDA_R_16BF, config.ldA,
-                     B, CUDA_R_16BF, config.ldB,
-                     &beta, d_C_ref, CUDA_R_16BF, config.ldC,
-                     CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-    }
-
-    cublasDestroy(handle);
-
-    // Copy reference result to host
-    CUDA_CHECK(cudaMemcpy(C_ref.data(), d_C_ref, M * N * sizeof(T), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaFree(d_C_ref));
-
-    // Copy test result to host
-    std::vector<T> C_test_host(M * N);
-    CUDA_CHECK(cudaMemcpy(C_test_host.data(), C_test, M * N * sizeof(T), cudaMemcpyDeviceToHost));
-
-    // Compare results
-    // If transpose_compare is true:
-    //   - C_test is row-major: C_test[m,n] = C_test[m*N + n]
-    //   - C_ref is col-major: C_ref[m,n] = C_ref[n*M + m]
-    //   So we compare C_test[m*N + n] with C_ref[n*M + m]
-    bool correct = true;
-    int errors = 0;
-    const int max_errors_to_show = 5;
-
-    for (int m = 0; m < M && errors < max_errors_to_show; ++m) {
-        for (int n = 0; n < N && errors < max_errors_to_show; ++n) {
-            float ref_val, test_val;
-
-            int test_idx = m * N + n;  // row-major index
-            int ref_idx = transpose_compare ? (n * M + m) : (m * N + n);
-
-            if constexpr (std::is_same_v<T, float>) {
-                ref_val = C_ref[ref_idx];
-                test_val = C_test_host[test_idx];
-            } else if constexpr (std::is_same_v<T, __half>) {
-                ref_val = __half2float(C_ref[ref_idx]);
-                test_val = __half2float(C_test_host[test_idx]);
-            } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
-                ref_val = __bfloat162float(C_ref[ref_idx]);
-                test_val = __bfloat162float(C_test_host[test_idx]);
-            }
-
-            float abs_error = std::abs(test_val - ref_val);
-            float rel_error = (ref_val != 0.0f) ? abs_error / std::abs(ref_val) : abs_error;
-
-            if (abs_error > tolerance && rel_error > tolerance) {
-                if (errors == 0) {
-                    std::cout << "  Verification errors found:" << std::endl;
-                }
-                std::cout << "    C[" << m << "," << n << "]: expected " << ref_val
-                          << ", got " << test_val << " (error: " << abs_error << ")" << std::endl;
-                errors++;
-                correct = false;
-            }
-        }
-    }
-
-    if (errors >= max_errors_to_show) {
-        std::cout << "    ... (showing first " << max_errors_to_show << " errors)" << std::endl;
-    }
-
-    return correct;
+/**
+ * @brief Helper to format TFLOPS with color based on percentage of cuBLAS
+ */
+inline std::string formatTFLOPS(float tflops, float cublas_tflops) {
+    std::ostringstream ss;
+    float pct = (cublas_tflops > 0) ? (tflops / cublas_tflops * 100.0f) : 0.0f;
+    const char* color = (pct >= 100.0f) ? COLOR_GREEN : (pct >= 70.0f) ? COLOR_YELLOW : COLOR_RED;
+    ss << color << std::fixed << std::setprecision(1) << std::setw(6) << tflops << COLOR_RESET;
+    return ss.str();
 }
 
 /**
  * @brief Benchmark GEMM with configuration from config.yaml
+ *
+ * Display hierarchy:
+ *   Problem (precision) -> Size -> Mode -> Impl -> Versions (as table columns)
  */
 template<typename T>
 void benchmarkGEMM(const ConfigParser& config) {
     std::string type_name;
     if constexpr (std::is_same_v<T, float>) {
-        type_name = "float";
+        type_name = "float32";
     } else if constexpr (std::is_same_v<T, __half>) {
-        type_name = "half";
+        type_name = "float16";
     } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
         type_name = "bfloat16";
     }
-    std::cout << "\n========================================" << std::endl;
-    std::cout << "GEMM Benchmark (" << type_name << ")" << std::endl;
-    std::cout << "========================================" << std::endl;
-    
+
     // Get configuration
-    std::string impl = config.getOperatorImpl("gemm");
-    int version = config.getOperatorVersion("gemm");
+    auto impl_list = config.getOperatorImpls("gemm");
+    auto version_list = config.getOperatorVersions("gemm");
     std::string init_method = config.getOperatorInitMethod("gemm");
     std::vector<std::string> opmode_list = config.getOperatorModes("gemm");
     auto matrix_sizes = config.getOperatorMatrixSizes("gemm");
     int warmup_runs = config.getWarmupRuns();
     int measurement_runs = config.getMeasurementRuns();
     bool verbose = config.getOperatorVerbose("gemm");
-    
+
     // Parse init method
     auto [init_A, init_B] = parseBinaryInitMethod(init_method);
-    
-    std::cout << "Configuration:" << std::endl;
-    std::cout << "  Implementation: " << impl << " (version " << version << ")" << std::endl;
-    std::cout << "  Modes: ";
-    // verbose Mode in modelist
-    for (const auto& opmode : opmode_list) {
-        std::cout << opmode << ", ";
+
+    // Print problem header
+    std::cout << "\n" << COLOR_BOLD << COLOR_CYAN
+              << "+" << repeatStr("=", 66) << "+" << COLOR_RESET << std::endl;
+    std::cout << COLOR_BOLD << COLOR_CYAN << "|" << COLOR_RESET
+              << "  GEMM Benchmark - " << COLOR_BOLD << type_name << COLOR_RESET
+              << repeatStr(" ", 45 - static_cast<int>(type_name.length()))
+              << COLOR_BOLD << COLOR_CYAN << "|" << COLOR_RESET << std::endl;
+    std::cout << COLOR_BOLD << COLOR_CYAN
+              << "+" << repeatStr("=", 66) << "+" << COLOR_RESET << std::endl;
+
+    // Print config summary
+    std::cout << COLOR_DIM << "  Impls: ";
+    for (size_t i = 0; i < impl_list.size(); ++i) {
+        std::cout << impl_list[i];
+        if (i < impl_list.size() - 1) std::cout << ", ";
     }
-    std::cout << "  Init method: " << init_method << std::endl;
-    std::cout << "  Verbose mode: " << (verbose ? "enabled" : "disabled") << std::endl;
-    std::cout << "  Matrix sizes: ";
-    for (size_t i = 0; i < matrix_sizes.size(); ++i) {
-        std::cout << matrix_sizes[i];
-        if (i < matrix_sizes.size() - 1) std::cout << ", ";
+    std::cout << " | Versions: ";
+    for (size_t i = 0; i < version_list.size(); ++i) {
+        std::cout << "v" << version_list[i];
+        if (i < version_list.size() - 1) std::cout << ", ";
     }
-    std::cout << std::endl << std::endl;
+    std::cout << " | Modes: ";
+    for (size_t i = 0; i < opmode_list.size(); ++i) {
+        std::cout << opmode_list[i];
+        if (i < opmode_list.size() - 1) std::cout << ", ";
+    }
+    std::cout << COLOR_RESET << std::endl;
     
     BenchmarkRunner runner(warmup_runs, measurement_runs);
-    std::vector<BenchmarkResult> results;
-    
-    // Create CSV writer
-    std::string csv_filename = "bench_results/gemm_results_" + type_name + "_" + impl + ".csv";
+
+    // Create CSV writer with all impls in filename
+    std::string impl_str;
+    for (size_t i = 0; i < impl_list.size(); ++i) {
+        impl_str += impl_list[i];
+        if (i < impl_list.size() - 1) impl_str += "_";
+    }
+    std::string csv_filename = "bench_results/gemm_results_" + type_name + "_" + impl_str + ".csv";
     CSVWriter csv(csv_filename);
     if (!csv.isOpen()) {
         std::cerr << "ERROR: Failed to create CSV file: " << csv_filename << std::endl;
@@ -239,258 +152,194 @@ void benchmarkGEMM(const ConfigParser& config) {
 
     // Random number generator for initialization
     std::mt19937 gen(42); // Fixed seed for reproducibility
-    
-    for (const auto& opmode : opmode_list) {
-        for (int size : matrix_sizes) {
-            int M = size, N = size, K = size; // Square matrices
-            
+
+    // Calculate column widths for table
+    int col_width = 12;  // Width for each version column
+
+    // Loop order: Size -> Mode -> Impl -> (Versions displayed as table)
+    for (int size : matrix_sizes) {
+        int M = size, N = size, K = size; // Square matrices
+
+        // Size section header
+        std::string size_str = std::to_string(M) + "x" + std::to_string(N) + "x" + std::to_string(K);
+        int header_padding = 52 - static_cast<int>(size_str.length());
+        std::cout << "\n" << COLOR_BOLD << "+-- Size: " << size_str << " "
+                  << repeatStr("-", header_padding) << "+" << COLOR_RESET << std::endl;
+
+        for (const auto& opmode : opmode_list) {
             // Parse opmode to determine storage formats
-            char lhs_format = (opmode.length() >= 1) ? opmode[0] : 'R';  // R or C
-            char rhs_format = (opmode.length() >= 2) ? opmode[1] : 'R';  // R or C
-            
-            // Logical dimensions for GEMM: C(M×N) = A(M×K) × B(K×N)
-            // Storage dimensions depend on format:
-            // - Row-major A(M×K): stored as M×K
-            // - Column-major A(M×K): stored as K×M (transposed in memory)
+            char lhs_format = (opmode.length() >= 1) ? opmode[0] : 'R';
+            char rhs_format = (opmode.length() >= 2) ? opmode[1] : 'R';
+
+            // Storage dimensions
             int A_storage_rows = (lhs_format == 'R') ? M : K;
             int A_storage_cols = (lhs_format == 'R') ? K : M;
             int B_storage_rows = (rhs_format == 'R') ? K : N;
             int B_storage_cols = (rhs_format == 'R') ? N : K;
-            
-            // Print problem info in one concise line
-            std::cout << "\n" << COLOR_BOLD << "[" << M << "x" << N << "x" << K << "]" << COLOR_RESET
-                      << " " << type_name << " | " << impl << " v" << version
-                      << " | " << opmode << " ... ";
-            
-            // Allocate host memory (using storage dimensions)
+
+            // Allocate host memory
             std::vector<T> h_A(A_storage_rows * A_storage_cols);
             std::vector<T> h_B(B_storage_rows * B_storage_cols);
-            std::vector<T> h_C(M * N);
-            
-            // Initialize matrices with logical dimensions and storage format
-            // This ensures the initialization pattern is based on logical matrix structure
+
+            // Initialize matrices
             initializeMatrix(h_A.data(), M, K, init_A, gen, lhs_format);
             initializeMatrix(h_B.data(), K, N, init_B, gen, rhs_format);
-            std::fill(h_C.begin(), h_C.end(), T{0});
-            
-            // Print initialized matrices if verbose mode is enabled
-            if (verbose) {
-                printMatrix(h_A, M, K, "A", lhs_format, 16);
-                printMatrix(h_B, K, N, "B", rhs_format, 16);
-            }
-            
+
             // Allocate device memory
             T *d_A, *d_B, *d_C;
             CUDA_CHECK(cudaMalloc(&d_A, A_storage_rows * A_storage_cols * sizeof(T)));
             CUDA_CHECK(cudaMalloc(&d_B, B_storage_rows * B_storage_cols * sizeof(T)));
             CUDA_CHECK(cudaMalloc(&d_C, M * N * sizeof(T)));
-            
+
             // Copy data to device
             CUDA_CHECK(cudaMemcpy(d_A, h_A.data(), A_storage_rows * A_storage_cols * sizeof(T), cudaMemcpyHostToDevice));
             CUDA_CHECK(cudaMemcpy(d_B, h_B.data(), B_storage_rows * B_storage_cols * sizeof(T), cudaMemcpyHostToDevice));
-            
-            // Benchmark selected implementation
-            CUDA_CHECK(cudaMemset(d_C, 0, M * N * sizeof(T)));
 
-            // Skip CuTe for bfloat16 (not supported)
-            if constexpr (std::is_same_v<T, __nv_bfloat16>) {
-                if (impl == "cute") {
-                    std::cerr << "CuTe does not support bfloat16, skipping..." << std::endl;
-                    continue;
-                }
-            }
-
-            auto kernel = [&]() {
-                if constexpr (std::is_same_v<T, __nv_bfloat16>) {
-                    baseline::gemm(d_A, d_B, d_C, M, N, K, opmode.c_str(), version);
-                } else {
-                    if (impl == "cute") {
-                        kebab::cute::gemm(d_A, d_B, d_C, M, N, K, opmode.c_str(), version);
-                    } else {
-                        baseline::gemm(d_A, d_B, d_C, M, N, K, opmode.c_str(), version);
-                    }
-                }
-            };
-            float latency = runner.measureLatency(kernel);
-            
-            // Calculate GFLOPS
+            // First: benchmark cuBLAS (reference for all)
             size_t flops = 2ULL * M * N * K;
-            float gflops = runner.calculateGFLOPS(flops, latency);
-            
-            // Benchmark cuBLAS for comparison (using same configuration as verification)
             CUDA_CHECK(cudaMemset(d_C, 0, M * N * sizeof(T)));
-            auto config = getCublasConfig(opmode, M, N, K);
 
-            // Create cuBLAS handle OUTSIDE the kernel lambda to avoid timing handle creation/destruction
+            // Get cuBLAS config using already-parsed lhs_format and rhs_format
+            auto cublas_config = getCublasGemmConfig(lhs_format, rhs_format, M, N, K);
+
             cublasHandle_t handle;
             cublasCreate(&handle);
 
+            // Use shared cuBLAS function for benchmarking
             auto cublas_kernel = [&]() {
-                if constexpr (std::is_same_v<T, float>) {
-                    const float alpha = 1.0f, beta = 0.0f;
-                    cublasSgemm(handle, config.opA, config.opB, M, N, K,
-                                &alpha, d_A, config.ldA, d_B, config.ldB, &beta, d_C, config.ldC);
-                } else if constexpr (std::is_same_v<T, __half>) {
-                    const __half alpha = __float2half(1.0f), beta = __float2half(0.0f);
-                    cublasHgemm(handle, config.opA, config.opB, M, N, K,
-                                &alpha, d_A, config.ldA, d_B, config.ldB, &beta, d_C, config.ldC);
-                } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
-                    // BFloat16: use cublasGemmEx with FP32 accumulation (matches fast.cu)
-                    const float alpha = 1.0f, beta = 0.0f;
-                    cublasGemmEx(handle, config.opA, config.opB, M, N, K,
-                                 &alpha, d_A, CUDA_R_16BF, config.ldA,
-                                 d_B, CUDA_R_16BF, config.ldB,
-                                 &beta, d_C, CUDA_R_16BF, config.ldC,
-                                 CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-                }
+                runCublasGemm(handle, d_A, d_B, d_C, M, N, K, cublas_config);
             };
 
             float cublas_latency = runner.measureLatency(cublas_kernel);
-
-            // Destroy cuBLAS handle AFTER measurement
             cublasDestroy(handle);
-            float cublas_gflops = runner.calculateGFLOPS(flops, cublas_latency);
-            
-            // Verify correctness FIRST
-            float tolerance;
-            if constexpr (std::is_same_v<T, __half>) {
-                tolerance = (size <= 512) ? 0.15f : (size <= 1024) ? 0.25f : 1.5f;
-            } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
-                tolerance = (size <= 512) ? 0.2f : (size <= 1024) ? 0.35f : 2.0f;
-            } else {
-                tolerance = 1e-3f;
-            }
+            float cublas_tflops = runner.calculateGFLOPS(flops, cublas_latency) / 1000.0f;
 
-            // Reset C for verification
-            CUDA_CHECK(cudaMemset(d_C, 0, M * N * sizeof(T)));
-            if constexpr (std::is_same_v<T, __nv_bfloat16>) {
-                baseline::gemm(d_A, d_B, d_C, M, N, K, opmode.c_str(), version);
-            } else {
-                if (impl == "cute") {
-                    kebab::cute::gemm(d_A, d_B, d_C, M, N, K, opmode.c_str(), version);
-                } else {
-                    baseline::gemm(d_A, d_B, d_C, M, N, K, opmode.c_str(), version);
+            // Mode header with table structure
+            std::cout << COLOR_DIM << "|" << COLOR_RESET << " Mode: " << COLOR_BOLD << opmode << COLOR_RESET << std::endl;
+
+            // Print table header: | Impl | cuBLAS | v1 | v2 | v3 | ... |
+            std::cout << COLOR_DIM << "|  +";
+            std::cout << repeatStr("-", 10) << "+" << repeatStr("-", col_width);  // Impl + cuBLAS
+            for (size_t i = 0; i < version_list.size(); ++i) {
+                std::cout << "+" << repeatStr("-", col_width);
+            }
+            std::cout << "+" << COLOR_RESET << std::endl;
+
+            // Header row
+            std::cout << COLOR_DIM << "|  |" << COLOR_RESET << std::setw(10) << "Impl"
+                      << COLOR_DIM << "|" << COLOR_RESET << std::setw(col_width) << "cuBLAS";
+            for (int ver : version_list) {
+                std::cout << COLOR_DIM << "|" << COLOR_RESET << std::setw(col_width) << ("v" + std::to_string(ver));
+            }
+            std::cout << COLOR_DIM << "|" << COLOR_RESET << std::endl;
+
+            // Separator
+            std::cout << COLOR_DIM << "|  +";
+            std::cout << repeatStr("-", 10) << "+" << repeatStr("-", col_width);
+            for (size_t i = 0; i < version_list.size(); ++i) {
+                std::cout << "+" << repeatStr("-", col_width);
+            }
+            std::cout << "+" << COLOR_RESET << std::endl;
+
+            // For each impl, run all versions and display as row
+            for (const auto& impl : impl_list) {
+                // Skip CuTe for bfloat16
+                if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+                    if (impl == "cute") continue;
                 }
-            }
 
-            bool correct = verifyGEMM(d_A, d_B, d_C, M, N, K, opmode, tolerance, false);
+                // Collect TFLOPS for each version
+                std::vector<float> version_tflops;
+                std::vector<bool> version_valid;
 
-            if (!correct) {
-                std::cout << COLOR_RED << "✗ FAILED" << COLOR_RESET << " (skipping benchmark)" << std::endl;
-                CUDA_CHECK(cudaFree(d_A));
-                CUDA_CHECK(cudaFree(d_B));
-                CUDA_CHECK(cudaFree(d_C));
-                continue;
-            }
-            std::cout << COLOR_GREEN << "✓" << COLOR_RESET << std::endl;
+                // Use shared tolerance calculation for consistency with runonce
+                float tolerance = getVerificationTolerance<T>(size);
 
-            // Performance results
-            float speedup = cublas_gflops > 0 ? gflops / cublas_gflops : 0.0f;
-            float pct = speedup * 100.0f;
+                for (int version : version_list) {
+                    CUDA_CHECK(cudaMemset(d_C, 0, M * N * sizeof(T)));
 
-            // Color based on performance
-            const char* pct_color = (pct >= 100.0f) ? COLOR_GREEN : (pct >= 70.0f) ? COLOR_YELLOW : COLOR_RED;
+                    auto kernel = [&]() {
+                        if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+                            baseline::gemm(d_A, d_B, d_C, M, N, K, opmode.c_str(), version);
+                        } else {
+                            if (impl == "cute") {
+                                kebab::cute::gemm(d_A, d_B, d_C, M, N, K, opmode.c_str(), version);
+                            } else {
+                                baseline::gemm(d_A, d_B, d_C, M, N, K, opmode.c_str(), version);
+                            }
+                        }
+                    };
 
-            // Print compact performance table
-            // Choose precision for latency and TFLOPS display
-            auto format_latency = [](float lat) -> std::string {
-                std::ostringstream ss;
-                if (lat < 0.01f) ss << std::fixed << std::setprecision(4) << lat;
-                else if (lat < 0.1f) ss << std::fixed << std::setprecision(3) << lat;
-                else if (lat < 1.0f) ss << std::fixed << std::setprecision(2) << lat;
-                else ss << std::fixed << std::setprecision(1) << lat;
-                return ss.str();
-            };
+                    // Verify first
+                    kernel();
+                    bool correct = verifyGEMM(d_A, d_B, d_C, M, N, K, opmode, tolerance, false);
 
-            float tflops = gflops / 1000.0f;  // GFLOPS to TFLOPS
-            float cublas_tflops = cublas_gflops / 1000.0f;
+                    if (correct) {
+                        CUDA_CHECK(cudaMemset(d_C, 0, M * N * sizeof(T)));
+                        float latency = runner.measureLatency(kernel);
+                        float tflops = runner.calculateGFLOPS(flops, latency) / 1000.0f;
+                        version_tflops.push_back(tflops);
+                        version_valid.push_back(true);
 
-            std::cout << std::fixed;
-            std::cout << COLOR_DIM << "  ├─ " << COLOR_RESET << std::setw(8) << impl
-                      << COLOR_DIM << " │ " << COLOR_RESET
-                      << std::setw(8) << format_latency(latency) << " ms"
-                      << COLOR_DIM << " │ " << COLOR_RESET
-                      << std::setprecision(1) << std::setw(7) << tflops << " TFLOPS" << std::endl;
-            std::cout << COLOR_DIM << "  ├─ " << COLOR_RESET << std::setw(8) << "cuBLAS"
-                      << COLOR_DIM << " │ " << COLOR_RESET
-                      << std::setw(8) << format_latency(cublas_latency) << " ms"
-                      << COLOR_DIM << " │ " << COLOR_RESET
-                      << std::setprecision(1) << std::setw(7) << cublas_tflops << " TFLOPS" << std::endl;
-            std::cout << COLOR_DIM << "  └─ " << COLOR_RESET << "vs cuBLAS: "
-                      << pct_color << std::setprecision(1) << std::setw(5) << pct << "%" << COLOR_RESET << std::endl;
-
-            // Verbose output: show detailed matrix comparison
-            if (verbose) {
-                std::vector<T> h_A_copy(M * K), h_B_copy(K * N), h_C_result(M * N), h_C_reference(M * N);
-                CUDA_CHECK(cudaMemcpy(h_A_copy.data(), d_A, M * K * sizeof(T), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(h_B_copy.data(), d_B, K * N * sizeof(T), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(h_C_result.data(), d_C, M * N * sizeof(T), cudaMemcpyDeviceToHost));
-
-                T* d_C_ref;
-                CUDA_CHECK(cudaMalloc(&d_C_ref, M * N * sizeof(T)));
-                CUDA_CHECK(cudaMemset(d_C_ref, 0, M * N * sizeof(T)));
-
-                auto config2 = getCublasConfig(opmode, M, N, K);
-                cublasHandle_t handle2;
-                cublasCreate(&handle2);
-                if constexpr (std::is_same_v<T, float>) {
-                    const float alpha = 1.0f, beta = 0.0f;
-                    cublasSgemm(handle2, config2.opA, config2.opB, M, N, K,
-                               &alpha, d_A, config2.ldA, d_B, config2.ldB, &beta, d_C_ref, config2.ldC);
-                } else if constexpr (std::is_same_v<T, __half>) {
-                    const __half alpha = __float2half(1.0f), beta = __float2half(0.0f);
-                    cublasHgemm(handle2, config2.opA, config2.opB, M, N, K,
-                               &alpha, d_A, config2.ldA, d_B, config2.ldB, &beta, d_C_ref, config2.ldC);
-                } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
-                    const float alpha = 1.0f, beta = 0.0f;
-                    cublasGemmEx(handle2, config2.opA, config2.opB, M, N, K,
-                                 &alpha, d_A, CUDA_R_16BF, config2.ldA,
-                                 d_B, CUDA_R_16BF, config2.ldB,
-                                 &beta, d_C_ref, CUDA_R_16BF, config2.ldC,
-                                 CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+                        // Save to CSV
+                        BenchmarkResult result;
+                        result.operator_name = "GEMM";
+                        result.variant = impl + "_v" + std::to_string(version);
+                        result.batch_size = size;
+                        result.latency_ms = latency;
+                        result.throughput_gbps = tflops * 1000.0f;
+                        result.speedup_ratio = tflops / cublas_tflops;
+                        csv.writeResult(result);
+                    } else {
+                        version_tflops.push_back(0.0f);
+                        version_valid.push_back(false);
+                    }
                 }
-                cublasDestroy(handle2);
 
-                CUDA_CHECK(cudaMemcpy(h_C_reference.data(), d_C_ref, M * N * sizeof(T), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaFree(d_C_ref));
+                // Print row: | impl | cuBLAS_TFLOPS | v1_TFLOPS | v2_TFLOPS | ... |
+                std::cout << COLOR_DIM << "|  |" << COLOR_RESET << std::setw(10) << impl
+                          << COLOR_DIM << "|" << COLOR_RESET;
 
-                std::cout << "\n" << Colors::BOLD << Colors::BLUE
-                          << "═══════════════════════════════════════════════════════════════"
-                          << Colors::RESET << std::endl;
-                std::cout << Colors::BOLD << Colors::BLUE << "  Matrix Verification Details"
-                          << Colors::RESET << std::endl;
-                std::cout << Colors::BOLD << Colors::BLUE
-                          << "═══════════════════════════════════════════════════════════════"
-                          << Colors::RESET << std::endl;
+                // cuBLAS column (always reference)
+                std::cout << std::fixed << std::setprecision(1) << std::setw(col_width) << cublas_tflops;
 
-                int max_display = std::min(16, std::min(M, N));
-                printMatrix(h_A_copy, M, K, "A (Input)", lhs_format, max_display);
-                printMatrix(h_B_copy, K, N, "B (Input)", rhs_format, max_display);
-                printMatrix(h_C_result, M, N, "C (Result)", 'R', max_display);
-                printMatrix(h_C_reference, M, N, "C (cuBLAS Ref)", 'R', max_display);
+                // Version columns with color coding and percentage
+                for (size_t i = 0; i < version_list.size(); ++i) {
+                    std::cout << COLOR_DIM << "|" << COLOR_RESET;
+                    if (!version_valid[i]) {
+                        std::cout << COLOR_RED << std::setw(col_width) << "FAIL" << COLOR_RESET;
+                    } else {
+                        float pct = (cublas_tflops > 0) ? (version_tflops[i] / cublas_tflops * 100.0f) : 0.0f;
+                        const char* color = (pct >= 100.0f) ? COLOR_GREEN : (pct >= 70.0f) ? COLOR_YELLOW : COLOR_RED;
+                        std::ostringstream oss;
+                        oss << std::fixed << std::setprecision(1) << version_tflops[i]
+                            << "(" << static_cast<int>(pct) << "%)";
+                        std::cout << color << std::setw(col_width) << oss.str() << COLOR_RESET;
+                    }
+                }
+                std::cout << COLOR_DIM << "|" << COLOR_RESET << std::endl;
             }
 
-            // Save to CSV
-        BenchmarkResult result;
-        result.operator_name = "GEMM";
-        result.variant = impl;
-        result.batch_size = size;
-        result.latency_ms = latency;
-        result.throughput_gbps = gflops;  // Using GFLOPS field for throughput
-        result.speedup_ratio = speedup;
-        csv.writeResult(result);
-        
-        // Cleanup
-        CUDA_CHECK(cudaFree(d_A));
-        CUDA_CHECK(cudaFree(d_B));
-        CUDA_CHECK(cudaFree(d_C));
+            // Table footer
+            std::cout << COLOR_DIM << "|  +";
+            std::cout << repeatStr("-", 10) << "+" << repeatStr("-", col_width);
+            for (size_t i = 0; i < version_list.size(); ++i) {
+                std::cout << "+" << repeatStr("-", col_width);
+            }
+            std::cout << "+" << COLOR_RESET << std::endl;
+
+            // Cleanup device memory for this mode
+            CUDA_CHECK(cudaFree(d_A));
+            CUDA_CHECK(cudaFree(d_B));
+            CUDA_CHECK(cudaFree(d_C));
+        }
+
+        // Size section footer
+        std::cout << COLOR_BOLD << "+" << repeatStr("-", 65) << "+" << COLOR_RESET << std::endl;
     }
-    }
-    
-    std::cout << "\n========================================" << std::endl;
-    std::cout << "GEMM Benchmark Complete!" << std::endl;
-    std::cout << "========================================" << std::endl;
-    std::cout << "Results saved to: " << csv_filename << std::endl;
+
+    std::cout << "\n" << COLOR_GREEN << "✓ Benchmark complete!" << COLOR_RESET
+              << " Results saved to: " << csv_filename << std::endl;
 }
 
 int main(int argc, char** argv) {
@@ -550,9 +399,10 @@ int main(int argc, char** argv) {
     
     // Get precisions from config
     auto precisions = config.getOperatorPrecisions("gemm");
-    
-    // Get implementation from config
-    std::string impl = config.getOperatorImpl("gemm");
+
+    // Get implementations from config
+    auto impl_list = config.getOperatorImpls("gemm");
+    bool has_cuda_impl = std::find(impl_list.begin(), impl_list.end(), "cuda") != impl_list.end();
 
     // Run benchmarks for each precision
     for (const auto& precision : precisions) {
@@ -567,8 +417,8 @@ int main(int argc, char** argv) {
         } else if (precision == "bfloat16" || precision == "bf16") {
             if (!has_tensor_cores) {
                 std::cout << "\nSkipping bfloat16 precision benchmark (requires Tensor Core support)" << std::endl;
-            } else if (impl == "cute") {
-                std::cout << "\nSkipping bfloat16 precision benchmark (CuTe does not support bfloat16, use impl: cuda)" << std::endl;
+            } else if (!has_cuda_impl) {
+                std::cout << "\nSkipping bfloat16 precision benchmark (CuTe does not support bfloat16, add impl: cuda)" << std::endl;
             } else {
                 benchmarkGEMM<__nv_bfloat16>(config);
             }

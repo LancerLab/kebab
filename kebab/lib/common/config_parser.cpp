@@ -297,16 +297,73 @@ std::string ConfigParser::getOperatorImpl(const std::string& op_name) const {
     if (!loaded_) {
         throw std::runtime_error("Configuration not loaded");
     }
+    // Try vector first (new format)
+    auto impls = getOperatorImpls(op_name);
+    if (!impls.empty()) {
+        return impls[0];
+    }
+    // Fall back to single value (old format)
     std::string key = "operators." + op_name + ".impl";
     return impl_->get<std::string>(key, "cute");
+}
+
+std::vector<std::string> ConfigParser::getOperatorImpls(const std::string& op_name) const {
+    if (!loaded_) {
+        throw std::runtime_error("Configuration not loaded");
+    }
+    std::string key = "operators." + op_name + ".impl";
+
+    // First try to get as vector
+    auto result = impl_->getVector<std::string>(key, {});
+    if (!result.empty()) {
+        return result;
+    }
+
+    // Fall back to single value
+    std::string single = impl_->get<std::string>(key, "");
+    if (!single.empty()) {
+        return {single};
+    }
+
+    // Default
+    return {"cute"};
 }
 
 int ConfigParser::getOperatorVersion(const std::string& op_name) const {
     if (!loaded_) {
         throw std::runtime_error("Configuration not loaded");
     }
+    // Try vector first (new format: "versions")
+    auto versions = getOperatorVersions(op_name);
+    if (!versions.empty()) {
+        return versions[0];
+    }
+    // Fall back to single value (old format: "version")
     std::string key = "operators." + op_name + ".version";
     return impl_->get<int>(key, 1);
+}
+
+std::vector<int> ConfigParser::getOperatorVersions(const std::string& op_name) const {
+    if (!loaded_) {
+        throw std::runtime_error("Configuration not loaded");
+    }
+
+    // First try "versions" (new format, plural)
+    std::string key_plural = "operators." + op_name + ".versions";
+    auto result = impl_->getVector<int>(key_plural, {});
+    if (!result.empty()) {
+        return result;
+    }
+
+    // Fall back to "version" (old format, singular)
+    std::string key_singular = "operators." + op_name + ".version";
+    int single = impl_->get<int>(key_singular, -1);
+    if (single >= 0) {
+        return {single};
+    }
+
+    // Default
+    return {1};
 }
 
 std::string ConfigParser::getOperatorInitMethod(const std::string& op_name) const {

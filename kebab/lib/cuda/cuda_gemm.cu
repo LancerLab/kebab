@@ -134,15 +134,28 @@ void gemm(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
     char lhs_format = (opmode_str.length() >= 1) ? opmode_str[0] : 'R';
     char rhs_format = (opmode_str.length() >= 2) ? opmode_str[1] : 'C';
 
-    // Only V12 supports bfloat16 for now
-    if (version != 12) {
-        fprintf(stderr, "ERROR: BFloat16 only supported in version 12 (got version %d)\n", version);
-        fprintf(stderr, "       Set version: 12 in config.yaml for bfloat16 support\n");
-        return;
+    // Version dispatch for BFloat16
+    switch (version) {
+        case 1:
+            gemm_v1_warptiling_bf16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            break;
+        case 2:
+            gemm_v2_wgmma_tma_bf16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            break;
+        case 3:
+            gemm_v3_warpgroup_bf16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            break;
+        // case 11:
+        //     gemm_v11_hilbert_bf16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+        //     break;
+        case 12:
+            gemm_v12_stmatrix_bf16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            break;
+        default:
+            fprintf(stderr, "ERROR: Unsupported CUDA version %d for bfloat16\n", version);
+            fprintf(stderr, "       Available: 1, 2, 3, 11, 12\n");
+            return;
     }
-
-    // V12: stmatrix + Padded TMA Stores (SM90 Hopper, RC mode only)
-    gemm_v12_stmatrix_bf16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
 }
 
 } // namespace baseline

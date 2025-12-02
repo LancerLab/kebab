@@ -52,22 +52,24 @@ operators:
   gemm:
     enabled: true
     # GPU device ID to run on (0-based index, -1 for auto-select)
-    gpu_id: 0
+    gpu_id: 1
     # Implementation: cuda (baseline) | cute (CuTe/WGMMA implementation)
-    impl: cuda
-    # Version: kernel variant ID
+    # Can be a single value or a list of implementations to run
+    impl: [cuda]
+    # Version: kernel variant IDs to benchmark
     # cuda version 1: Baseline (naive kernels)
     # cuda version 2: WGMMA + TMA (based on fast.cu kernel 2)
     # cute version 1: WGMMA without TMA
     # cute version 2: WGMMA with TMA
     # cute version 3: Optimized multi-stage pipeline with TMA
-    version: 12
+    # When multiple versions are specified, they are displayed as columns in a comparison table
+    versions: [1, 2, 12]
     # Initialization method for matrices A and B
     # Format: <A_init>-<B_init>
     # Options: one, rand, range, row, col
     init_method: rand-rand
     # Matrix sizes for benchmarking (M=N=K for square matrices)
-    matrix_sizes: [256, 512, 1024, 2048, 4096, 8192, 16384]
+    matrix_sizes: [1024, 2048, 4096, 8192]
     # Operation modes: specify storage format of LHS and RHS
     # Format: <LHS_format><RHS_format>
     # - R: Row-major storage
@@ -80,7 +82,7 @@ operators:
     modes: [RC]
     # Precision: float32, float16, bfloat16
     # Note: bfloat16 is only supported by CUDA GEMM kernels (not CuTe)
-    precisions: [bfloat16]
+    precisions: [float16]
     # Tile sizes (for tuning): [M, N, K]
     # IMPORTANT: K dimension MUST be 64 for GMMA Layout_K_SW128_Atom compatibility
     # Supported configurations:

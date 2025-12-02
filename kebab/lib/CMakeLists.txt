@@ -51,6 +51,9 @@ target_link_libraries(kebab CUDA::cublas CUDA::cuda_driver yaml-cpp)
 # Benchmarks
 add_subdirectory(benchmark)
 
+# Microbenchmarks
+add_subdirectory(microbench)
+
 # Examples
 add_subdirectory(examples)
 

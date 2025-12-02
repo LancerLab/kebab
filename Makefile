@@ -44,6 +44,13 @@ OPERATORS := elementwise_add gemm
 OPERATORS_TGT := $(subst _,-,$(OPERATORS))
 
 # ============================================================================
+# Microbenchmarks (Define list for auto-generation of targets)
+# ============================================================================
+MICROBENCHS := copy_gmem_to_smem
+# Convert underscores to hyphens for target names
+MICROBENCHS_TGT := $(subst _,-,$(MICROBENCHS))
+
+# ============================================================================
 # Baselines
 # ============================================================================
 BASELINES := cuda_elementwise_add cuda_gemm
@@ -287,17 +294,33 @@ help:
 	@$(foreach op,$(OPERATORS_TGT),echo "  make bench-$(op)";)
 	@echo "  make bench-all          - Run all benchmarks and generate summary"
 	@echo ""
-	@echo "Profiling targets (single-run, no loops, for Nsight Compute):"
-	@$(foreach op,$(OPERATORS_TGT),echo "  make tune-$(op)";)
-	@$(foreach op,$(OPERATORS_TGT),echo "  make tune-$(op)-ref";)
-	@echo "  make tune-all           - Profile all operators with ncu"
+	@echo "Microbenchmark targets (after build):"
+	@$(foreach mb,$(MICROBENCHS_TGT),echo "  make mbench-$(mb)";)
+	@echo ""
+	@echo "Dump targets (PTX/SASS with human-readable kernel names):"
+	@$(foreach mb,$(MICROBENCHS_TGT),echo "  make mdump-$(mb)";)
+	@$(foreach op,$(OPERATORS_TGT),echo "  make dump-$(op)-cute";)
+	@$(foreach op,$(OPERATORS_TGT),echo "  make dump-$(op)-cuda";)
+	@$(foreach op,$(OPERATORS_TGT),echo "  make dump-$(op)-ref";)
+	@echo ""
+	@echo "Profiling targets (Nsight Compute):"
+	@echo "  Microbenchmarks (per-kernel reports):"
+	@$(foreach mb,$(MICROBENCHS_TGT),echo "    make mtune-$(mb)";)
+	@echo "    make mtune-all        - Profile all microbenchmarks"
+	@echo "  Operators (single-run, no loops):"
+	@$(foreach op,$(OPERATORS_TGT),echo "    make tune-$(op)-cute";)
+	@$(foreach op,$(OPERATORS_TGT),echo "    make tune-$(op)-cuda";)
+	@$(foreach op,$(OPERATORS_TGT),echo "    make tune-$(op)-ref";)
+	@echo "    make tune-all         - Profile all operators (cute + cuda + ref)"
 	@echo ""
 	@echo "Debug/Run targets (for development):"
-	@$(foreach op,$(OPERATORS_TGT),echo "  make run-$(op)";)
+	@$(foreach op,$(OPERATORS_TGT),echo "  make run-$(op)-cute";)
+	@$(foreach op,$(OPERATORS_TGT),echo "  make run-$(op)-cuda";)
 	@$(foreach op,$(OPERATORS_TGT),echo "  make run-$(op)-ref";)
 	@echo ""
 	@echo "Report targets:"
-	@echo "  make report             - Generate text reports from NCU profiles (Details page)"
+	@echo "  make report             - Generate text reports from operator NCU profiles"
+	@echo "  make mreport            - Generate text reports from microbench NCU profiles"
 	@echo "=========================================="
 
 # Display detected GPU info
@@ -561,13 +584,291 @@ bench-all:
 	@echo "=========================================="
 
 # ============================================================================
+# Microbenchmark Targets (Auto-generated from MICROBENCHS list)
+# ============================================================================
+
+# Directory for kernel dump (PTX/SASS)
+DUMP_DIR := dump
+
+# Define a template for microbenchmark targets
+define MBENCH_TEMPLATE
+mbench-$(1): build
+	@echo "=========================================="
+	@echo "Running $(subst -,_,$(1)) Microbenchmark"
+	@echo "=========================================="
+	@$$(BUILD_DIR)/lib/microbench/mbench_$(subst -,_,$(1))
+	@echo "  ✓ Microbenchmark complete"
+endef
+
+# Define a template for microbenchmark dump (PTX/SASS) targets with human-readable names
+define MDUMP_TEMPLATE
+mdump-$(1): build
+	@echo "=========================================="
+	@echo "Dumping $(subst -,_,$(1)) kernels (PTX/SASS)"
+	@echo "=========================================="
+	@$$(MKDIR) $$(DUMP_DIR)/microbench/$(subst -,_,$(1))
+	@CUOBJDUMP=$$$$(which cuobjdump 2>/dev/null); \
+	if [ -z "$$$$CUOBJDUMP" ]; then \
+		echo "Searching for cuobjdump..."; \
+		for base_path in /usr/local/cuda-* /usr/local/cuda $$(CUDA_PATH); do \
+			if [ -d "$$$$base_path" ]; then \
+				if [ -x "$$$$base_path/bin/cuobjdump" ]; then \
+					CUOBJDUMP="$$$$base_path/bin/cuobjdump"; \
+					break; \
+				fi; \
+			fi; \
+		done; \
+	fi; \
+	if [ -z "$$$$CUOBJDUMP" ] || [ ! -x "$$$$CUOBJDUMP" ]; then \
+		echo ""; \
+		echo "  ✗ ERROR: cuobjdump not found"; \
+		echo ""; \
+		echo "  Please ensure CUDA toolkit is installed properly."; \
+		echo ""; \
+		exit 1; \
+	fi; \
+	BINARY=$$(BUILD_DIR)/lib/microbench/mbench_$(subst -,_,$(1)); \
+	OUTDIR=$$(DUMP_DIR)/microbench/$(subst -,_,$(1)); \
+	echo "Using cuobjdump: $$$$CUOBJDUMP"; \
+	echo "Binary: $$$$BINARY"; \
+	echo "Output: $$$$OUTDIR"; \
+	echo ""; \
+	echo "Extracting SASS (assembly)..."; \
+	$$$$CUOBJDUMP --dump-sass $$$$BINARY > $$$$OUTDIR/all_kernels.sass; \
+	echo "Extracting PTX (intermediate)..."; \
+	$$$$CUOBJDUMP --dump-ptx $$$$BINARY > $$$$OUTDIR/all_kernels.ptx 2>/dev/null || echo "  (No embedded PTX found)"; \
+	echo ""; \
+	echo "Splitting SASS by kernel (with demangled names)..."; \
+	( cd $$$$OUTDIR && \
+	csplit -z -f kernel_ -b '%02d.sass' all_kernels.sass '/Function :/' '{*}' >/dev/null 2>&1 && \
+	for f in kernel_*.sass; do \
+		if [ -f "$$$$f" ]; then \
+			mangled=$$$$(grep -oP 'Function : \K[^ ]+' "$$$$f" | head -1); \
+			if [ -n "$$$$mangled" ]; then \
+				demangled=$$$$(echo "$$$$mangled" | c++filt 2>/dev/null | sed 's/(.*//'); \
+				if [ -n "$$$$demangled" ] && [ "$$$$demangled" != "$$$$mangled" ]; then \
+					mv "$$$$f" "$$$${demangled}.sass"; \
+					echo "  $$$${demangled}.sass"; \
+				else \
+					mv "$$$$f" "$$$${mangled}.sass"; \
+					echo "  $$$${mangled}.sass"; \
+				fi; \
+			else \
+				rm -f "$$$$f"; \
+			fi; \
+		fi; \
+	done ); \
+	echo ""; \
+	echo "Splitting PTX by kernel (with demangled names)..."; \
+	( cd $$$$OUTDIR && \
+	csplit -z -f kernel_ -b '%02d.ptx' all_kernels.ptx '/\.visible \.entry/' '{*}' >/dev/null 2>&1 && \
+	for f in kernel_*.ptx; do \
+		if [ -f "$$$$f" ]; then \
+			mangled=$$$$(grep -oP '\.visible \.entry \K[^(]+' "$$$$f" | head -1); \
+			if [ -n "$$$$mangled" ]; then \
+				demangled=$$$$(echo "$$$$mangled" | c++filt 2>/dev/null | sed 's/(.*//'); \
+				if [ -n "$$$$demangled" ] && [ "$$$$demangled" != "$$$$mangled" ]; then \
+					if [ ! -f "$$$${demangled}.ptx" ]; then \
+						echo "  $$$${demangled}.ptx"; \
+					fi; \
+					mv "$$$$f" "$$$${demangled}.ptx"; \
+				else \
+					if [ ! -f "$$$${mangled}.ptx" ]; then \
+						echo "  $$$${mangled}.ptx"; \
+					fi; \
+					mv "$$$$f" "$$$${mangled}.ptx"; \
+				fi; \
+			else \
+				rm -f "$$$$f"; \
+			fi; \
+		fi; \
+	done ); \
+	echo ""; \
+	echo "Generated files in $$$$OUTDIR/:"; \
+	ls -lh $$$$OUTDIR/*.sass $$$$OUTDIR/*.ptx 2>/dev/null | grep -v all_kernels || true; \
+	echo ""; \
+	echo "  ✓ Dump complete"
+endef
+
+# Generate microbenchmark targets for each microbenchmark
+$(foreach mb,$(MICROBENCHS_TGT),$(eval $(call MBENCH_TEMPLATE,$(mb))))
+
+# Generate microbenchmark dump targets for each microbenchmark
+$(foreach mb,$(MICROBENCHS_TGT),$(eval $(call MDUMP_TEMPLATE,$(mb))))
+
+# Define a template for microbenchmark NCU profiling targets (per-kernel reports)
+define MTUNE_TEMPLATE
+mtune-$(1): build
+	@echo "=========================================="
+	@echo "NCU Profiling $(subst -,_,$(1)) Microbenchmark"
+	@echo "=========================================="
+	@NCU=$$$$(which ncu 2>/dev/null || which nv-nsight-cu-cli 2>/dev/null); \
+	if [ -z "$$$$NCU" ]; then \
+		echo "Searching for Nsight Compute installation..."; \
+		for base_path in /usr/local/cuda-* /opt/nvidia/nsight-compute /usr/local/cuda $$(CUDA_PATH); do \
+			if [ -d "$$$$base_path" ]; then \
+				for ncu_path in $$$$base_path/bin/ncu $$$$base_path/nsight-compute*/ncu $$$$base_path/nsight-compute/ncu; do \
+					if [ -x "$$$$ncu_path" ]; then \
+						NCU="$$$$ncu_path"; \
+						break 2; \
+					fi; \
+				done; \
+			fi; \
+		done; \
+	fi; \
+	if [ -z "$$$$NCU" ] || [ ! -x "$$$$NCU" ]; then \
+		echo ""; \
+		echo "  ✗ ERROR: Nsight Compute (ncu) not found"; \
+		echo ""; \
+		echo "  Please install Nsight Compute:"; \
+		echo "    https://developer.nvidia.com/nsight-compute"; \
+		echo ""; \
+		exit 1; \
+	fi; \
+	NCU_VERSION=$$$$($$$$NCU --version 2>/dev/null | grep -oP 'Version \K[0-9]+\.[0-9]+' | head -n1); \
+	echo "Using NCU: $$$$NCU (Version $$$$NCU_VERSION)"; \
+	$$(MKDIR) $$(PROFILING_DIR); \
+	BINARY=$$(BUILD_DIR)/lib/microbench/mbench_$(subst -,_,$(1)); \
+	echo ""; \
+	echo "Binary: $$$$BINARY"; \
+	echo ""; \
+	if [ -n "$$(KERNEL)" ]; then \
+		PROFILE_NAME="mbench_$(subst -,_,$(1))_$$(KERNEL)"; \
+		echo "Profiling kernel: $$(KERNEL)"; \
+		echo "Output: $$(PROFILING_DIR)/$$$$PROFILE_NAME.ncu-rep"; \
+		echo ""; \
+		$$$$NCU --set full \
+			--export $$(PROFILING_DIR)/$$$$PROFILE_NAME \
+			--force-overwrite \
+			--kernel-name regex:"$$(KERNEL)" \
+			--launch-count 1 \
+			$$$$BINARY 2>&1 | grep -v "^==" || true; \
+		echo ""; \
+		if [ -f "$$(PROFILING_DIR)/$$$$PROFILE_NAME.ncu-rep" ]; then \
+			echo "  ✓ Profile saved: $$(PROFILING_DIR)/$$$$PROFILE_NAME.ncu-rep"; \
+		else \
+			echo "  ✗ No profile generated"; \
+		fi; \
+	else \
+		echo "Profiling each kernel separately..."; \
+		echo "(Use 'make mtune-$(1) KERNEL=<name>' to profile specific kernel)"; \
+		echo ""; \
+		KERNELS=$$$$(nm $$$$BINARY 2>/dev/null | grep -oP 'kernel_[a-z_]+' | sort -u); \
+		if [ -z "$$$$KERNELS" ]; then \
+			echo "  Note: Could not detect kernel names, using defaults"; \
+			KERNELS="kernel_copy_native kernel_copy_vectorized kernel_copy_ptx kernel_copy_cute"; \
+		fi; \
+		for kernel in $$$$KERNELS; do \
+			PROFILE_NAME="mbench_$(subst -,_,$(1))_$$$$kernel"; \
+			echo "Profiling: $$$$kernel"; \
+			$$$$NCU --set full \
+				--export $$(PROFILING_DIR)/$$$$PROFILE_NAME \
+				--force-overwrite \
+				--kernel-name regex:"$$$$kernel" \
+				--launch-count 1 \
+				$$$$BINARY 2>&1 | grep -v "^==" || true; \
+			if [ -f "$$(PROFILING_DIR)/$$$$PROFILE_NAME.ncu-rep" ]; then \
+				echo "  ✓ $$(PROFILING_DIR)/$$$$PROFILE_NAME.ncu-rep"; \
+			else \
+				echo "  ✗ Failed for $$$$kernel"; \
+			fi; \
+			echo ""; \
+		done; \
+	fi; \
+	echo ""; \
+	echo "Generated profiles:"; \
+	ls -lh $$(PROFILING_DIR)/mbench_$(subst -,_,$(1))_*.ncu-rep 2>/dev/null || echo "  No profiles found"
+endef
+
+# Generate microbenchmark NCU profiling targets for each microbenchmark
+$(foreach mb,$(MICROBENCHS_TGT),$(eval $(call MTUNE_TEMPLATE,$(mb))))
+
+# mtune-all: Profile all microbenchmarks
+mtune-all: build
+	@echo "=========================================="
+	@echo "Profiling All Microbenchmarks"
+	@echo "=========================================="
+	@$(foreach mb,$(MICROBENCHS_TGT), \
+		echo ""; \
+		echo "Profiling microbenchmark: $(mb)"; \
+		$(MAKE) mtune-$(mb) || exit 1; \
+	)
+	@echo ""
+	@echo "=========================================="
+	@echo "All Microbenchmarks Profiled Successfully!"
+	@echo "=========================================="
+	@echo "Profile reports available in: $(PROFILING_DIR)/"
+	@ls -lh $(PROFILING_DIR)/mbench_*.ncu-rep 2>/dev/null || true
+	@echo "=========================================="
+
+# mreport: Generate text reports from microbenchmark NCU profiles
+mreport:
+	@echo "=========================================="
+	@echo "Generating Reports from Microbench NCU Profiles"
+	@echo "=========================================="
+	@$(MKDIR) reports
+	@echo ""
+	@echo "Processing microbenchmark NCU report files..."
+	@NCU_FILES=$$(find $(PROFILING_DIR) -name "mbench_*.ncu-rep" -type f 2>/dev/null | sort); \
+	if [ -z "$$NCU_FILES" ]; then \
+		echo "  ⚠ No microbenchmark NCU report files found in $(PROFILING_DIR)/"; \
+		echo "  Please run 'make mtune-all' first to generate profiles."; \
+		exit 1; \
+	fi; \
+	COUNT=0; \
+	SKIPPED=0; \
+	for ncu_file in $$NCU_FILES; do \
+		base_name=$$(basename "$$ncu_file" .ncu-rep); \
+		report_file="reports/$${base_name}_report.txt"; \
+		if [ -f "$$report_file" ]; then \
+			echo "  Skipping: $$base_name (report already exists)"; \
+			SKIPPED=$$((SKIPPED + 1)); \
+		else \
+			echo "  Exporting: $$base_name"; \
+			NCU_BIN=$$(which ncu 2>/dev/null || which nv-nsight-cu-cli 2>/dev/null); \
+			if [ -z "$$NCU_BIN" ]; then \
+				for base_path in /usr/local/cuda-* /opt/nvidia/nsight-compute /usr/local/cuda; do \
+					if [ -d "$$base_path" ]; then \
+						for ncu_path in $$base_path/bin/ncu $$base_path/nsight-compute*/ncu $$base_path/nsight-compute/ncu; do \
+							if [ -x "$$ncu_path" ]; then \
+								NCU_BIN="$$ncu_path"; \
+								break 2; \
+							fi; \
+						done; \
+					fi; \
+				done; \
+			fi; \
+			if [ -z "$$NCU_BIN" ] || [ ! -x "$$NCU_BIN" ]; then \
+				echo "    ✗ NCU not found, skipping"; \
+				continue; \
+			fi; \
+			$$NCU_BIN --import "$$ncu_file" --page details > "$$report_file" 2>&1; \
+			if [ -s "$$report_file" ]; then \
+				echo "    ✓ $$report_file"; \
+				COUNT=$$((COUNT + 1)); \
+			else \
+				echo "    ✗ Failed to generate report"; \
+				rm -f "$$report_file"; \
+			fi; \
+		fi; \
+	done; \
+	echo ""; \
+	echo "=========================================="
+	@echo "Microbench Report Generation Complete!"
+	@echo "=========================================="
+	@echo ""
+	@echo "All microbench reports:"
+	@ls -lh reports/mbench_*.txt 2>/dev/null || echo "  No reports found"
+	@echo "=========================================="
+
+# ============================================================================
 # Profiling Targets (Auto-generated from OPERATORS list)
 # ============================================================================
 
-# Generate profiling targets for each operator (single-run, no loops)
-$(addprefix tune-,$(OPERATORS_TGT)): tune-%: build
+# Generate profiling targets for CuTe implementation (single-run, no loops)
+$(addprefix tune-,$(addsuffix -cute,$(OPERATORS_TGT))): tune-%-cute: build
 	@echo "=========================================="
-	@echo "Profiling $(subst -,_,$*) Kernel (Single Run)"
+	@echo "Profiling $(subst -,_,$*) CuTe Kernel (Single Run)"
 	@echo "=========================================="
 	@NCU=$$(which ncu 2>/dev/null || which nv-nsight-cu-cli 2>/dev/null); \
 	if [ -z "$$NCU" ]; then \
@@ -596,16 +897,78 @@ $(addprefix tune-,$(OPERATORS_TGT)): tune-%: build
 	echo "Using NCU: $$NCU (Version $$NCU_VERSION)"; \
 	$(MKDIR) $(PROFILING_DIR); \
 	TIMESTAMP=$$(date +%Y%m%d_%H%M%S); \
-	PROFILE_NAME="$(subst -,_,$*)_runonce_$${TIMESTAMP}_profile"; \
+	PROFILE_NAME="$(subst -,_,$*)_cute_$${TIMESTAMP}_profile"; \
 	echo ""; \
-	echo "Running ncu profiler on $(subst -,_,$*) kernel (single run)..."; \
+	echo "Running ncu profiler on $(subst -,_,$*) CuTe kernel (single run)..."; \
 	echo "Output will be saved to: $(PROFILING_DIR)/$${PROFILE_NAME}.ncu-rep"; \
 	echo ""; \
 	$$NCU --set full \
 		--export $(PROFILING_DIR)/$${PROFILE_NAME} \
 		--force-overwrite \
 		--target-processes all \
-		$(BUILD_DIR)/lib/benchmark/runonce_$(subst -,_,$*) || \
+		$(BUILD_DIR)/lib/benchmark/runonce_$(subst -,_,$*)_cute || \
+		{ echo ""; \
+		  echo "  ⚠ Warning: Profiling completed with errors"; \
+		  echo "  Profile data may still be available."; \
+		  echo ""; \
+		}; \
+	echo ""; \
+	echo "=========================================="; \
+	echo "Profiling Complete!"; \
+	echo "=========================================="; \
+	if [ -f "$(PROFILING_DIR)/$${PROFILE_NAME}.ncu-rep" ]; then \
+		echo "Results saved to:"; \
+		echo "  - NCU Report:  $(PROFILING_DIR)/$${PROFILE_NAME}.ncu-rep"; \
+		echo ""; \
+		echo "To view in Nsight Compute GUI:"; \
+		echo "  ncu-ui $(PROFILING_DIR)/$${PROFILE_NAME}.ncu-rep"; \
+	else \
+		echo "  ✗ Profiling failed - no report generated"; \
+	fi; \
+	echo "=========================================="
+
+# Generate profiling targets for CUDA baseline implementation (single-run, no loops)
+$(addprefix tune-,$(addsuffix -cuda,$(OPERATORS_TGT))): tune-%-cuda: build
+	@echo "=========================================="
+	@echo "Profiling $(subst -,_,$*) CUDA Baseline Kernel (Single Run)"
+	@echo "=========================================="
+	@NCU=$$(which ncu 2>/dev/null || which nv-nsight-cu-cli 2>/dev/null); \
+	if [ -z "$$NCU" ]; then \
+		echo "Searching for Nsight Compute installation..."; \
+		for base_path in /usr/local/cuda-* /opt/nvidia/nsight-compute /usr/local/cuda $(CUDA_PATH); do \
+			if [ -d "$$base_path" ]; then \
+				for ncu_path in $$base_path/bin/ncu $$base_path/nsight-compute*/ncu $$base_path/nsight-compute/ncu; do \
+					if [ -x "$$ncu_path" ]; then \
+						NCU="$$ncu_path"; \
+						break 2; \
+					fi; \
+				done; \
+			fi; \
+		done; \
+	fi; \
+	if [ -z "$$NCU" ] || [ ! -x "$$NCU" ]; then \
+		echo ""; \
+		echo "  ✗ ERROR: Nsight Compute (ncu) not found"; \
+		echo ""; \
+		echo "  Please install Nsight Compute:"; \
+		echo "    https://developer.nvidia.com/nsight-compute"; \
+		echo ""; \
+		exit 1; \
+	fi; \
+	NCU_VERSION=$$($$NCU --version 2>/dev/null | grep -oP 'Version \K[0-9]+\.[0-9]+' | head -n1); \
+	echo "Using NCU: $$NCU (Version $$NCU_VERSION)"; \
+	$(MKDIR) $(PROFILING_DIR); \
+	TIMESTAMP=$$(date +%Y%m%d_%H%M%S); \
+	PROFILE_NAME="$(subst -,_,$*)_cuda_$${TIMESTAMP}_profile"; \
+	echo ""; \
+	echo "Running ncu profiler on $(subst -,_,$*) CUDA baseline kernel (single run)..."; \
+	echo "Output will be saved to: $(PROFILING_DIR)/$${PROFILE_NAME}.ncu-rep"; \
+	echo ""; \
+	$$NCU --set full \
+		--export $(PROFILING_DIR)/$${PROFILE_NAME} \
+		--force-overwrite \
+		--target-processes all \
+		$(BUILD_DIR)/lib/benchmark/runonce_$(subst -,_,$*)_cuda || \
 		{ echo ""; \
 		  echo "  ⚠ Warning: Profiling completed with errors"; \
 		  echo "  Profile data may still be available."; \
@@ -690,12 +1053,13 @@ $(addsuffix -ref,$(addprefix tune-,$(OPERATORS_TGT))): tune-%-ref: build
 
 tune-all:
 	@echo "=========================================="
-	@echo "Profiling All Operators"
+	@echo "Profiling All Operators (CuTe + CUDA + Ref)"
 	@echo "=========================================="
 	@$(foreach op,$(OPERATORS_TGT), \
 		echo ""; \
 		echo "Profiling operator: $(op)"; \
-		$(MAKE) tune-$(op) || exit 1; \
+		$(MAKE) tune-$(op)-cute || exit 1; \
+		$(MAKE) tune-$(op)-cuda || exit 1; \
 		$(MAKE) tune-$(op)-ref || exit 1; \
 	)
 	@echo ""
@@ -710,21 +1074,269 @@ tune-all:
 # Debug/Run Targets (Auto-generated from OPERATORS list)
 # ============================================================================
 
-# Generate run targets for each operator (for development/debugging)
-$(addprefix run-,$(OPERATORS_TGT)): run-%: build
+# Generate run targets for CuTe implementation
+$(addprefix run-,$(addsuffix -cute,$(OPERATORS_TGT))): run-%-cute: build
 	@echo "=========================================="
-	@echo "Running $(subst -,_,$*) Kernel (Single Run)"
+	@echo "Running $(subst -,_,$*) CuTe Kernel (Single Run)"
 	@echo "=========================================="
-	@$(BUILD_DIR)/lib/benchmark/runonce_$(subst -,_,$*)
+	@$(BUILD_DIR)/lib/benchmark/runonce_$(subst -,_,$*)_cute
+	@echo "=========================================="
+
+# Generate run targets for CUDA baseline implementation
+$(addprefix run-,$(addsuffix -cuda,$(OPERATORS_TGT))): run-%-cuda: build
+	@echo "=========================================="
+	@echo "Running $(subst -,_,$*) CUDA Kernel (Single Run)"
+	@echo "=========================================="
+	@$(BUILD_DIR)/lib/benchmark/runonce_$(subst -,_,$*)_cuda
 	@echo "=========================================="
 
 # Generate run-ref targets for reference implementations
 $(addprefix run-,$(addsuffix -ref,$(OPERATORS_TGT))): run-%-ref: build
 	@echo "=========================================="
-	@echo "Running $(subst -ref,,$(subst -,_,$*)) Reference Kernel (Single Run)"
+	@echo "Running $(subst -,_,$*) Reference Kernel (Single Run)"
 	@echo "=========================================="
-	@$(BUILD_DIR)/lib/benchmark/runonce_$(subst -ref,,$(subst -,_,$*))_ref
+	@$(BUILD_DIR)/lib/benchmark/runonce_$(subst -,_,$*)_ref
 	@echo "=========================================="
+
+# ============================================================================
+# Operator Dump Targets (PTX/SASS with human-readable names)
+# ============================================================================
+
+# Generate dump targets for CuTe implementation
+$(addprefix dump-,$(addsuffix -cute,$(OPERATORS_TGT))): dump-%-cute: build
+	@echo "=========================================="
+	@echo "Dumping $(subst -,_,$*) CuTe kernels (PTX/SASS)"
+	@echo "=========================================="
+	@$(MKDIR) $(DUMP_DIR)/operator/$(subst -,_,$*)_cute
+	@CUOBJDUMP=$$(which cuobjdump 2>/dev/null); \
+	if [ -z "$$CUOBJDUMP" ]; then \
+		echo "Searching for cuobjdump..."; \
+		for base_path in /usr/local/cuda-* /usr/local/cuda $(CUDA_PATH); do \
+			if [ -d "$$base_path" ]; then \
+				if [ -x "$$base_path/bin/cuobjdump" ]; then \
+					CUOBJDUMP="$$base_path/bin/cuobjdump"; \
+					break; \
+				fi; \
+			fi; \
+		done; \
+	fi; \
+	if [ -z "$$CUOBJDUMP" ] || [ ! -x "$$CUOBJDUMP" ]; then \
+		echo ""; \
+		echo "  ✗ ERROR: cuobjdump not found"; \
+		exit 1; \
+	fi; \
+	BINARY=$(BUILD_DIR)/lib/benchmark/runonce_$(subst -,_,$*)_cute; \
+	OUTDIR=$(DUMP_DIR)/operator/$(subst -,_,$*)_cute; \
+	echo "Using cuobjdump: $$CUOBJDUMP"; \
+	echo "Binary: $$BINARY"; \
+	echo "Output: $$OUTDIR"; \
+	echo ""; \
+	echo "Extracting SASS (assembly)..."; \
+	$$CUOBJDUMP --dump-sass $$BINARY > $$OUTDIR/all_kernels.sass; \
+	echo "Extracting PTX (intermediate)..."; \
+	$$CUOBJDUMP --dump-ptx $$BINARY > $$OUTDIR/all_kernels.ptx 2>/dev/null || echo "  (No embedded PTX found)"; \
+	echo ""; \
+	echo "Splitting SASS by kernel (with demangled names)..."; \
+	( cd $$OUTDIR && \
+	csplit -z -f kernel_ -b '%02d.sass' all_kernels.sass '/Function :/' '{*}' >/dev/null 2>&1 && \
+	for f in kernel_*.sass; do \
+		if [ -f "$$f" ]; then \
+			mangled=$$(grep -oP 'Function : \K[^ ]+' "$$f" | head -1); \
+			if [ -n "$$mangled" ]; then \
+				demangled=$$(echo "$$mangled" | c++filt 2>/dev/null | sed 's/(.*//'); \
+				if [ -n "$$demangled" ] && [ "$$demangled" != "$$mangled" ]; then \
+					mv "$$f" "$${demangled}.sass"; \
+					echo "  $${demangled}.sass"; \
+				else \
+					mv "$$f" "$${mangled}.sass"; \
+					echo "  $${mangled}.sass"; \
+				fi; \
+			else \
+				rm -f "$$f"; \
+			fi; \
+		fi; \
+	done ); \
+	echo ""; \
+	echo "Splitting PTX by kernel (with demangled names)..."; \
+	( cd $$OUTDIR && \
+	csplit -z -f kernel_ -b '%02d.ptx' all_kernels.ptx '/\.visible \.entry/' '{*}' >/dev/null 2>&1 && \
+	for f in kernel_*.ptx; do \
+		if [ -f "$$f" ]; then \
+			mangled=$$(grep -oP '\.visible \.entry \K[^(]+' "$$f" | head -1); \
+			if [ -n "$$mangled" ]; then \
+				demangled=$$(echo "$$mangled" | c++filt 2>/dev/null | sed 's/(.*//'); \
+				if [ -n "$$demangled" ] && [ "$$demangled" != "$$mangled" ]; then \
+					if [ ! -f "$${demangled}.ptx" ]; then \
+						echo "  $${demangled}.ptx"; \
+					fi; \
+					mv "$$f" "$${demangled}.ptx"; \
+				else \
+					if [ ! -f "$${mangled}.ptx" ]; then \
+						echo "  $${mangled}.ptx"; \
+					fi; \
+					mv "$$f" "$${mangled}.ptx"; \
+				fi; \
+			else \
+				rm -f "$$f"; \
+			fi; \
+		fi; \
+	done ); \
+	echo ""; \
+	echo "Generated files in $$OUTDIR/:"; \
+	ls -lh $$OUTDIR/*.sass $$OUTDIR/*.ptx 2>/dev/null | grep -v all_kernels || true; \
+	echo ""; \
+	echo "  ✓ Dump complete"
+
+# Generate dump targets for CUDA baseline implementation
+$(addprefix dump-,$(addsuffix -cuda,$(OPERATORS_TGT))): dump-%-cuda: build
+	@echo "=========================================="
+	@echo "Dumping $(subst -,_,$*) CUDA baseline kernels (PTX/SASS)"
+	@echo "=========================================="
+	@$(MKDIR) $(DUMP_DIR)/operator/$(subst -,_,$*)_cuda
+	@CUOBJDUMP=$$(which cuobjdump 2>/dev/null); \
+	if [ -z "$$CUOBJDUMP" ]; then \
+		for base_path in /usr/local/cuda-* /usr/local/cuda $(CUDA_PATH); do \
+			if [ -d "$$base_path" ] && [ -x "$$base_path/bin/cuobjdump" ]; then \
+				CUOBJDUMP="$$base_path/bin/cuobjdump"; \
+				break; \
+			fi; \
+		done; \
+	fi; \
+	if [ -z "$$CUOBJDUMP" ] || [ ! -x "$$CUOBJDUMP" ]; then \
+		echo "  ✗ ERROR: cuobjdump not found"; exit 1; \
+	fi; \
+	BINARY=$(BUILD_DIR)/lib/benchmark/runonce_$(subst -,_,$*)_cuda; \
+	OUTDIR=$(DUMP_DIR)/operator/$(subst -,_,$*)_cuda; \
+	echo "Using cuobjdump: $$CUOBJDUMP"; \
+	echo "Binary: $$BINARY"; \
+	echo "Output: $$OUTDIR"; \
+	echo ""; \
+	echo "Extracting SASS (assembly)..."; \
+	$$CUOBJDUMP --dump-sass $$BINARY > $$OUTDIR/all_kernels.sass; \
+	echo "Extracting PTX (intermediate)..."; \
+	$$CUOBJDUMP --dump-ptx $$BINARY > $$OUTDIR/all_kernels.ptx 2>/dev/null || echo "  (No embedded PTX found)"; \
+	echo ""; \
+	echo "Splitting SASS by kernel (with demangled names)..."; \
+	( cd $$OUTDIR && \
+	csplit -z -f kernel_ -b '%02d.sass' all_kernels.sass '/Function :/' '{*}' >/dev/null 2>&1 && \
+	for f in kernel_*.sass; do \
+		if [ -f "$$f" ]; then \
+			mangled=$$(grep -oP 'Function : \K[^ ]+' "$$f" | head -1); \
+			if [ -n "$$mangled" ]; then \
+				demangled=$$(echo "$$mangled" | c++filt 2>/dev/null | sed 's/(.*//'); \
+				if [ -n "$$demangled" ] && [ "$$demangled" != "$$mangled" ]; then \
+					mv "$$f" "$${demangled}.sass"; echo "  $${demangled}.sass"; \
+				else \
+					mv "$$f" "$${mangled}.sass"; echo "  $${mangled}.sass"; \
+				fi; \
+			else rm -f "$$f"; fi; \
+		fi; \
+	done ); \
+	echo ""; \
+	echo "Splitting PTX by kernel (with demangled names)..."; \
+	( cd $$OUTDIR && \
+	csplit -z -f kernel_ -b '%02d.ptx' all_kernels.ptx '/\.visible \.entry/' '{*}' >/dev/null 2>&1 && \
+	for f in kernel_*.ptx; do \
+		if [ -f "$$f" ]; then \
+			mangled=$$(grep -oP '\.visible \.entry \K[^(]+' "$$f" | head -1); \
+			if [ -n "$$mangled" ]; then \
+				demangled=$$(echo "$$mangled" | c++filt 2>/dev/null | sed 's/(.*//'); \
+				if [ -n "$$demangled" ] && [ "$$demangled" != "$$mangled" ]; then \
+					if [ ! -f "$${demangled}.ptx" ]; then echo "  $${demangled}.ptx"; fi; \
+					mv "$$f" "$${demangled}.ptx"; \
+				else \
+					if [ ! -f "$${mangled}.ptx" ]; then echo "  $${mangled}.ptx"; fi; \
+					mv "$$f" "$${mangled}.ptx"; \
+				fi; \
+			else rm -f "$$f"; fi; \
+		fi; \
+	done ); \
+	echo ""; \
+	echo "Generated files in $$OUTDIR/:"; \
+	ls -lh $$OUTDIR/*.sass $$OUTDIR/*.ptx 2>/dev/null | grep -v all_kernels || true; \
+	echo ""; \
+	echo "  ✓ Dump complete"
+
+# Generate dump-ref targets for reference implementations
+$(addprefix dump-,$(addsuffix -ref,$(OPERATORS_TGT))): dump-%-ref: build
+	@echo "=========================================="
+	@echo "Dumping $(subst -,_,$*) reference kernels (PTX/SASS)"
+	@echo "=========================================="
+	@$(MKDIR) $(DUMP_DIR)/operator/$(subst -,_,$*)_ref
+	@CUOBJDUMP=$$(which cuobjdump 2>/dev/null); \
+	if [ -z "$$CUOBJDUMP" ]; then \
+		for base_path in /usr/local/cuda-* /usr/local/cuda $(CUDA_PATH); do \
+			if [ -d "$$base_path" ] && [ -x "$$base_path/bin/cuobjdump" ]; then \
+				CUOBJDUMP="$$base_path/bin/cuobjdump"; \
+				break; \
+			fi; \
+		done; \
+	fi; \
+	if [ -z "$$CUOBJDUMP" ] || [ ! -x "$$CUOBJDUMP" ]; then \
+		echo "  ✗ ERROR: cuobjdump not found"; \
+		exit 1; \
+	fi; \
+	BINARY=$(BUILD_DIR)/lib/benchmark/runonce_$(subst -,_,$*)_ref; \
+	OUTDIR=$(DUMP_DIR)/operator/$(subst -,_,$*)_ref; \
+	echo "Using cuobjdump: $$CUOBJDUMP"; \
+	echo "Binary: $$BINARY"; \
+	echo "Output: $$OUTDIR"; \
+	echo ""; \
+	echo "Extracting SASS (assembly)..."; \
+	$$CUOBJDUMP --dump-sass $$BINARY > $$OUTDIR/all_kernels.sass; \
+	echo "Extracting PTX (intermediate)..."; \
+	$$CUOBJDUMP --dump-ptx $$BINARY > $$OUTDIR/all_kernels.ptx 2>/dev/null || echo "  (No embedded PTX found)"; \
+	echo ""; \
+	echo "Splitting SASS by kernel (with demangled names)..."; \
+	( cd $$OUTDIR && \
+	csplit -z -f kernel_ -b '%02d.sass' all_kernels.sass '/Function :/' '{*}' >/dev/null 2>&1 && \
+	for f in kernel_*.sass; do \
+		if [ -f "$$f" ]; then \
+			mangled=$$(grep -oP 'Function : \K[^ ]+' "$$f" | head -1); \
+			if [ -n "$$mangled" ]; then \
+				demangled=$$(echo "$$mangled" | c++filt 2>/dev/null | sed 's/(.*//'); \
+				if [ -n "$$demangled" ] && [ "$$demangled" != "$$mangled" ]; then \
+					mv "$$f" "$${demangled}.sass"; \
+					echo "  $${demangled}.sass"; \
+				else \
+					mv "$$f" "$${mangled}.sass"; \
+					echo "  $${mangled}.sass"; \
+				fi; \
+			else \
+				rm -f "$$f"; \
+			fi; \
+		fi; \
+	done ); \
+	echo ""; \
+	echo "Splitting PTX by kernel (with demangled names)..."; \
+	( cd $$OUTDIR && \
+	csplit -z -f kernel_ -b '%02d.ptx' all_kernels.ptx '/\.visible \.entry/' '{*}' >/dev/null 2>&1 && \
+	for f in kernel_*.ptx; do \
+		if [ -f "$$f" ]; then \
+			mangled=$$(grep -oP '\.visible \.entry \K[^(]+' "$$f" | head -1); \
+			if [ -n "$$mangled" ]; then \
+				demangled=$$(echo "$$mangled" | c++filt 2>/dev/null | sed 's/(.*//'); \
+				if [ -n "$$demangled" ] && [ "$$demangled" != "$$mangled" ]; then \
+					if [ ! -f "$${demangled}.ptx" ]; then \
+						echo "  $${demangled}.ptx"; \
+					fi; \
+					mv "$$f" "$${demangled}.ptx"; \
+				else \
+					if [ ! -f "$${mangled}.ptx" ]; then \
+						echo "  $${mangled}.ptx"; \
+					fi; \
+					mv "$$f" "$${mangled}.ptx"; \
+				fi; \
+			else \
+				rm -f "$$f"; \
+			fi; \
+		fi; \
+	done ); \
+	echo ""; \
+	echo "Generated files in $$OUTDIR/:"; \
+	ls -lh $$OUTDIR/*.sass $$OUTDIR/*.ptx 2>/dev/null | grep -v all_kernels || true; \
+	echo ""; \
+	echo "  ✓ Dump complete"
 
 # ============================================================================
 # Report Generation Target - Extract Summary and Details from NCU reports
@@ -794,16 +1406,32 @@ report:
 # Report Extraction Targets (Auto-generated from OPERATORS list)
 # ============================================================================
 
-# Generate report extraction targets for each operator
-$(addprefix report-,$(OPERATORS_TGT)): report-%:
+# Generate report extraction targets for CuTe implementation
+$(addprefix report-,$(addsuffix -cute,$(OPERATORS_TGT))): report-%-cute:
 	@echo "=========================================="
-	@echo "Extracting Report for $(subst -,_,$*) Kernel"
+	@echo "Extracting Report for $(subst -,_,$*) CuTe Kernel"
 	@echo "=========================================="
 	@$(MKDIR) reports
-	@LATEST_REP=$$(ls -t $(PROFILING_DIR)/$(subst -,_,$*)_runonce_*_profile.ncu-rep 2>/dev/null | head -n1); \
+	@LATEST_REP=$$(ls -t $(PROFILING_DIR)/$(subst -,_,$*)_cute_*_profile.ncu-rep 2>/dev/null | head -n1); \
 	if [ -z "$$LATEST_REP" ]; then \
-		echo "Error: No profiling report found for $(subst -,_,$*)"; \
-		echo "Please run 'make tune-$(subst _,-,$*)' first"; \
+		echo "Error: No profiling report found for $(subst -,_,$*) CuTe"; \
+		echo "Please run 'make tune-$(subst _,-,$*)-cute' first"; \
+		exit 1; \
+	fi; \
+	echo "Processing: $$LATEST_REP"; \
+	python3 scripts/extract_ncu_report.py "$$LATEST_REP" reports/ || exit 1; \
+	echo "=========================================="
+
+# Generate report extraction targets for CUDA baseline implementation
+$(addprefix report-,$(addsuffix -cuda,$(OPERATORS_TGT))): report-%-cuda:
+	@echo "=========================================="
+	@echo "Extracting Report for $(subst -,_,$*) CUDA Kernel"
+	@echo "=========================================="
+	@$(MKDIR) reports
+	@LATEST_REP=$$(ls -t $(PROFILING_DIR)/$(subst -,_,$*)_cuda_*_profile.ncu-rep 2>/dev/null | head -n1); \
+	if [ -z "$$LATEST_REP" ]; then \
+		echo "Error: No profiling report found for $(subst -,_,$*) CUDA"; \
+		echo "Please run 'make tune-$(subst _,-,$*)-cuda' first"; \
 		exit 1; \
 	fi; \
 	echo "Processing: $$LATEST_REP"; \
@@ -811,7 +1439,7 @@ $(addprefix report-,$(OPERATORS_TGT)): report-%:
 	echo "=========================================="
 
 # Generate report extraction targets for reference kernels
-$(addsuffix -ref,$(addprefix report-,$(OPERATORS_TGT))): report-%-ref:
+$(addprefix report-,$(addsuffix -ref,$(OPERATORS_TGT))): report-%-ref:
 	@echo "=========================================="
 	@echo "Extracting Report for $(subst -,_,$*) Reference Kernel"
 	@echo "=========================================="

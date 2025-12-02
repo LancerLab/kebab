@@ -139,10 +139,22 @@ void gemm_v12_stmatrix_fp16(const __half* A, const __half* B, __half* C,
 // BFloat16 kernel declarations (bf16 input/output, FP32 accumulation)
 // ============================================================================
 
-/**
- * @brief V12 BF16: stmatrix + Padded TMA Stores with bf16
- * bf16 input/output with FP32 accumulation (matches fast.cu setup)
- */
+void gemm_v1_warptiling_bf16(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
+                              int M, int N, int K, char lhs_format, char rhs_format,
+                              cudaStream_t stream);
+
+void gemm_v2_wgmma_tma_bf16(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
+                            int M, int N, int K, char lhs_format, char rhs_format,
+                            cudaStream_t stream);
+
+void gemm_v3_warpgroup_bf16(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
+                            int M, int N, int K, char lhs_format, char rhs_format,
+                            cudaStream_t stream);
+
+// void gemm_v11_hilbert_bf16(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
+//                            int M, int N, int K, char lhs_format, char rhs_format,
+//                            cudaStream_t stream);
+
 void gemm_v12_stmatrix_bf16(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
                             int M, int N, int K, char lhs_format, char rhs_format,
                             cudaStream_t stream);

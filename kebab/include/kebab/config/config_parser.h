@@ -51,10 +51,17 @@ public:
     std::vector<std::string> getOperatorPrecisions(const std::string& op_name) const;
     
     // New: Implementation selection (cuda | cute)
+    // Returns single impl for backward compatibility
     std::string getOperatorImpl(const std::string& op_name) const;
-    
-    // New: Version selection for kernel variants
+
+    // New: Get multiple implementations (for multi-impl benchmarks)
+    std::vector<std::string> getOperatorImpls(const std::string& op_name) const;
+
+    // New: Version selection for kernel variants (backward compatibility)
     int getOperatorVersion(const std::string& op_name) const;
+
+    // New: Get multiple versions (for version comparison table)
+    std::vector<int> getOperatorVersions(const std::string& op_name) const;
     
     // New: Initialization method for binary operators
     std::string getOperatorInitMethod(const std::string& op_name) const;
