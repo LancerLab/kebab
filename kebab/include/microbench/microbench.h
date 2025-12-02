@@ -68,27 +68,46 @@ public:
             kernel_func();
         }
         MBENCH_CUDA_CHECK(cudaDeviceSynchronize());
-        
-        // Measurement
-        MBENCH_CUDA_CHECK(cudaEventRecord(start_));
-        for (int i = 0; i < measure_iters_; ++i) {
-            kernel_func();
+
+        // Measurement with multiple runs to ensure sufficient time
+        // If single run is too fast, increase iterations
+        int actual_iters = measure_iters_;
+        float total_ms = 0.0f;
+
+        // Try to get at least 10ms of measurement time
+        while (total_ms < 10.0f && actual_iters < 10000) {
+            MBENCH_CUDA_CHECK(cudaEventRecord(start_));
+            for (int i = 0; i < actual_iters; ++i) {
+                kernel_func();
+            }
+            MBENCH_CUDA_CHECK(cudaEventRecord(stop_));
+            MBENCH_CUDA_CHECK(cudaEventSynchronize(stop_));
+
+            MBENCH_CUDA_CHECK(cudaEventElapsedTime(&total_ms, start_, stop_));
+
+            // If still too fast, increase iterations
+            if (total_ms < 10.0f) {
+                actual_iters *= 2;
+            }
         }
-        MBENCH_CUDA_CHECK(cudaEventRecord(stop_));
-        MBENCH_CUDA_CHECK(cudaEventSynchronize(stop_));
-        
-        float total_ms;
-        MBENCH_CUDA_CHECK(cudaEventElapsedTime(&total_ms, start_, stop_));
-        return (total_ms * 1000.0f) / measure_iters_;  // Convert to microseconds
+
+        // Return average latency in microseconds
+        return (total_ms * 1000.0f) / actual_iters;
     }
     
     /**
      * @brief Calculate bandwidth in GB/s
+     *
+     * Formula:
+     * - bytes (in bytes) / latency_us (in microseconds) = bytes/us
+     * - bytes/us * (1 s / 1e6 us) = bytes/s
+     * - bytes/s / 1e9 = GB/s
+     * - Combined: bytes / (latency_us * 1e3)
      */
     static float calculateBandwidthGBps(size_t bytes, float latency_us) {
         if (latency_us <= 0.0f) return 0.0f;
-        // bytes / latency_us = bytes/us = MB/s, divide by 1000 to get GB/s
-        return static_cast<float>(bytes) / (latency_us * 1000.0f);
+        // bytes / (latency_us * 1e3) = (bytes / 1e9) / (latency_us / 1e6) = GB/s
+        return static_cast<float>(bytes) / (latency_us * 1e3);
     }
     
     int getWarmupIters() const { return warmup_iters_; }
