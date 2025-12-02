@@ -6,6 +6,7 @@
 #include "kebab/config/config_parser.h"
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
+#include <cuda_bf16.h>
 #include <vector>
 #include <iostream>
 #include <random>
@@ -99,6 +100,14 @@ bool verifyGEMM(const T* A, const T* B, const T* C_test, int M, int N, int K,
         const __half alpha = __float2half(1.0f), beta = __float2half(0.0f);
         cublasHgemm(handle, config.opA, config.opB, M, N, K,
                     &alpha, A, config.ldA, B, config.ldB, &beta, d_C_ref, config.ldC);
+    } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+        // BFloat16: use cublasGemmEx with FP32 accumulation (matches fast.cu)
+        const float alpha = 1.0f, beta = 0.0f;
+        cublasGemmEx(handle, config.opA, config.opB, M, N, K,
+                     &alpha, A, CUDA_R_16BF, config.ldA,
+                     B, CUDA_R_16BF, config.ldB,
+                     &beta, d_C_ref, CUDA_R_16BF, config.ldC,
+                     CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
     }
 
     cublasDestroy(handle);
@@ -130,9 +139,12 @@ bool verifyGEMM(const T* A, const T* B, const T* C_test, int M, int N, int K,
             if constexpr (std::is_same_v<T, float>) {
                 ref_val = C_ref[ref_idx];
                 test_val = C_test_host[test_idx];
-            } else {
+            } else if constexpr (std::is_same_v<T, __half>) {
                 ref_val = __half2float(C_ref[ref_idx]);
                 test_val = __half2float(C_test_host[test_idx]);
+            } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+                ref_val = __bfloat162float(C_ref[ref_idx]);
+                test_val = __bfloat162float(C_test_host[test_idx]);
             }
 
             float abs_error = std::abs(test_val - ref_val);
@@ -162,7 +174,14 @@ bool verifyGEMM(const T* A, const T* B, const T* C_test, int M, int N, int K,
  */
 template<typename T>
 void benchmarkGEMM(const ConfigParser& config) {
-    std::string type_name = std::is_same_v<T, float> ? "float" : "half";
+    std::string type_name;
+    if constexpr (std::is_same_v<T, float>) {
+        type_name = "float";
+    } else if constexpr (std::is_same_v<T, __half>) {
+        type_name = "half";
+    } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+        type_name = "bfloat16";
+    }
     std::cout << "\n========================================" << std::endl;
     std::cout << "GEMM Benchmark (" << type_name << ")" << std::endl;
     std::cout << "========================================" << std::endl;
@@ -271,12 +290,24 @@ void benchmarkGEMM(const ConfigParser& config) {
             
             // Benchmark selected implementation
             CUDA_CHECK(cudaMemset(d_C, 0, M * N * sizeof(T)));
-            
-            auto kernel = [&]() {
+
+            // Skip CuTe for bfloat16 (not supported)
+            if constexpr (std::is_same_v<T, __nv_bfloat16>) {
                 if (impl == "cute") {
-                    kebab::cute::gemm(d_A, d_B, d_C, M, N, K, opmode.c_str(), version);
-                } else {
+                    std::cerr << "CuTe does not support bfloat16, skipping..." << std::endl;
+                    continue;
+                }
+            }
+
+            auto kernel = [&]() {
+                if constexpr (std::is_same_v<T, __nv_bfloat16>) {
                     baseline::gemm(d_A, d_B, d_C, M, N, K, opmode.c_str(), version);
+                } else {
+                    if (impl == "cute") {
+                        kebab::cute::gemm(d_A, d_B, d_C, M, N, K, opmode.c_str(), version);
+                    } else {
+                        baseline::gemm(d_A, d_B, d_C, M, N, K, opmode.c_str(), version);
+                    }
                 }
             };
             float latency = runner.measureLatency(kernel);
@@ -298,10 +329,18 @@ void benchmarkGEMM(const ConfigParser& config) {
                     const float alpha = 1.0f, beta = 0.0f;
                     cublasSgemm(handle, config.opA, config.opB, M, N, K,
                                 &alpha, d_A, config.ldA, d_B, config.ldB, &beta, d_C, config.ldC);
-                } else {
+                } else if constexpr (std::is_same_v<T, __half>) {
                     const __half alpha = __float2half(1.0f), beta = __float2half(0.0f);
                     cublasHgemm(handle, config.opA, config.opB, M, N, K,
                                 &alpha, d_A, config.ldA, d_B, config.ldB, &beta, d_C, config.ldC);
+                } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+                    // BFloat16: use cublasGemmEx with FP32 accumulation (matches fast.cu)
+                    const float alpha = 1.0f, beta = 0.0f;
+                    cublasGemmEx(handle, config.opA, config.opB, M, N, K,
+                                 &alpha, d_A, CUDA_R_16BF, config.ldA,
+                                 d_B, CUDA_R_16BF, config.ldB,
+                                 &beta, d_C, CUDA_R_16BF, config.ldC,
+                                 CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
                 }
             };
 
@@ -334,16 +373,24 @@ void benchmarkGEMM(const ConfigParser& config) {
             float tolerance;
             if constexpr (std::is_same_v<T, __half>) {
                 tolerance = (size <= 512) ? 0.15f : (size <= 1024) ? 0.25f : 1.5f;
+            } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+                // BFloat16 has less precision than FP16, need higher tolerance
+                tolerance = (size <= 512) ? 0.2f : (size <= 1024) ? 0.35f : 2.0f;
             } else {
                 tolerance = 1e-3f;
             }
-        
+
             // Reset C for verification
             CUDA_CHECK(cudaMemset(d_C, 0, M * N * sizeof(T)));
-            if (impl == "cute") {
-                kebab::cute::gemm(d_A, d_B, d_C, M, N, K, opmode.c_str(), version);
-            } else {
+            if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+                // BFloat16 only uses baseline (CUDA) implementation
                 baseline::gemm(d_A, d_B, d_C, M, N, K, opmode.c_str(), version);
+            } else {
+                if (impl == "cute") {
+                    kebab::cute::gemm(d_A, d_B, d_C, M, N, K, opmode.c_str(), version);
+                } else {
+                    baseline::gemm(d_A, d_B, d_C, M, N, K, opmode.c_str(), version);
+                }
             }
 
             // Both kernel and cuBLAS output column-major C, no transpose needed
@@ -370,10 +417,17 @@ void benchmarkGEMM(const ConfigParser& config) {
                 const float alpha = 1.0f, beta = 0.0f;
                 cublasSgemm(handle, config.opA, config.opB, M, N, K,
                            &alpha, d_A, config.ldA, d_B, config.ldB, &beta, d_C_ref, config.ldC);
-            } else {
+            } else if constexpr (std::is_same_v<T, __half>) {
                 const __half alpha = __float2half(1.0f), beta = __float2half(0.0f);
                 cublasHgemm(handle, config.opA, config.opB, M, N, K,
                            &alpha, d_A, config.ldA, d_B, config.ldB, &beta, d_C_ref, config.ldC);
+            } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+                const float alpha = 1.0f, beta = 0.0f;
+                cublasGemmEx(handle, config.opA, config.opB, M, N, K,
+                             &alpha, d_A, CUDA_R_16BF, config.ldA,
+                             d_B, CUDA_R_16BF, config.ldB,
+                             &beta, d_C_ref, CUDA_R_16BF, config.ldC,
+                             CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
             }
             cublasDestroy(handle);
             
@@ -504,6 +558,9 @@ int main(int argc, char** argv) {
     // Get precisions from config
     auto precisions = config.getOperatorPrecisions("gemm");
     
+    // Get implementation from config
+    std::string impl = config.getOperatorImpl("gemm");
+
     // Run benchmarks for each precision
     for (const auto& precision : precisions) {
         if (precision == "float32" || precision == "float") {
@@ -514,8 +571,16 @@ int main(int argc, char** argv) {
             } else {
                 std::cout << "\nSkipping half precision benchmark (requires Tensor Core support)" << std::endl;
             }
+        } else if (precision == "bfloat16" || precision == "bf16") {
+            if (!has_tensor_cores) {
+                std::cout << "\nSkipping bfloat16 precision benchmark (requires Tensor Core support)" << std::endl;
+            } else if (impl == "cute") {
+                std::cout << "\nSkipping bfloat16 precision benchmark (CuTe does not support bfloat16, use impl: cuda)" << std::endl;
+            } else {
+                benchmarkGEMM<__nv_bfloat16>(config);
+            }
         }
     }
-    
+
     return 0;
 }

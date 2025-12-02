@@ -2,6 +2,7 @@
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cuda_bf16.h>
 
 namespace baseline {
 
@@ -24,6 +25,8 @@ namespace baseline {
 void gemm(const float* A, const float* B, float* C, int M, int N, int K,
           const char* opmode = "RC", int version = 1, cudaStream_t stream = 0);
 void gemm(const __half* A, const __half* B, __half* C, int M, int N, int K,
+          const char* opmode = "RC", int version = 1, cudaStream_t stream = 0);
+void gemm(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C, int M, int N, int K,
           const char* opmode = "RC", int version = 1, cudaStream_t stream = 0);
 
 // ============================================================================
@@ -129,6 +132,18 @@ void gemm_v11_hilbert_fp16(const __half* A, const __half* B, __half* C,
  * Uses stmatrix instruction for efficient shared memory stores with padding
  */
 void gemm_v12_stmatrix_fp16(const __half* A, const __half* B, __half* C,
+                            int M, int N, int K, char lhs_format, char rhs_format,
+                            cudaStream_t stream);
+
+// ============================================================================
+// BFloat16 kernel declarations (bf16 input/output, FP32 accumulation)
+// ============================================================================
+
+/**
+ * @brief V12 BF16: stmatrix + Padded TMA Stores with bf16
+ * bf16 input/output with FP32 accumulation (matches fast.cu setup)
+ */
+void gemm_v12_stmatrix_bf16(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
                             int M, int N, int K, char lhs_format, char rhs_format,
                             cudaStream_t stream);
 

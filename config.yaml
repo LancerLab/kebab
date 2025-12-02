@@ -61,13 +61,13 @@ operators:
     # cute version 1: WGMMA without TMA
     # cute version 2: WGMMA with TMA
     # cute version 3: Optimized multi-stage pipeline with TMA
-    version: 11
+    version: 12
     # Initialization method for matrices A and B
     # Format: <A_init>-<B_init>
     # Options: one, rand, range, row, col
     init_method: rand-rand
     # Matrix sizes for benchmarking (M=N=K for square matrices)
-    matrix_sizes: [256, 512, 1024, 2048, 4096]
+    matrix_sizes: [256, 512, 1024, 2048, 4096, 8192, 16384]
     # Operation modes: specify storage format of LHS and RHS
     # Format: <LHS_format><RHS_format>
     # - R: Row-major storage
@@ -78,8 +78,9 @@ operators:
     # - CR: A is column-major, B is row-major
     # - CC: Both A and B are column-major
     modes: [RC]
-    # Precision: float32, float16
-    precisions: [float16]
+    # Precision: float32, float16, bfloat16
+    # Note: bfloat16 is only supported by CUDA GEMM kernels (not CuTe)
+    precisions: [bfloat16]
     # Tile sizes (for tuning): [M, N, K]
     # IMPORTANT: K dimension MUST be 64 for GMMA Layout_K_SW128_Atom compatibility
     # Supported configurations:
