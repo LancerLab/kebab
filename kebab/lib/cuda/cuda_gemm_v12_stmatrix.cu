@@ -391,8 +391,40 @@ gemm_v12_stmatrix_kernel(int M, int N, int K,
         while (schedule.next(num_block_m, num_block_n)) {
             num_block_n = num_block_n * CLUSTER_N + rank_n;
             num_block_m = num_block_m * CLUSTER_M + rank_m;
-            memset(d, 0, sizeof(d));
-            for (int block_k_iter = 0; block_k_iter < num_blocks_k; ++block_k_iter, ++qidx) {
+
+            // First K iteration: ScaleD=0 for first WGMMA to initialize accumulators
+            {
+                if (qidx == QSIZE) { qidx = 0; p ^= 1; }
+                wait_v12(&full[qidx], p);
+                warpgroup_arrive_v12();
+                #pragma unroll
+                for (int m_it = 0; m_it < B_WG_M / WGMMA_M; ++m_it) {
+                    __half *wgmma_sA = sA + qidx * BK * BM + 64 * (m_it + wg_idx * B_WG_M / WGMMA_M) * WGMMA_M;
+                    __half *wgmma_sB = sB + qidx * BK * BN;
+                    {
+                        // First WGMMA with ScaleD=0 to initialize accumulator
+                        wgmma256_v12<0, 1, 1, 0, 0>(d[m_it], &wgmma_sA[0], &wgmma_sB[0]);
+                        #pragma unroll
+                        for (int k_it = 1; k_it < 64 / WGMMA_K; ++k_it)
+                            wgmma256_v12<1, 1, 1, 0, 0>(d[m_it], &wgmma_sA[k_it * WGMMA_K], &wgmma_sB[k_it * WGMMA_K]);
+                        wgmma_sA += 64 * BM; wgmma_sB += 64 * BN;
+                    }
+                    #pragma unroll
+                    for (int bk = 64; bk < BK; bk += 64) {
+                        #pragma unroll
+                        for (int k_it = 0; k_it < 64 / WGMMA_K; ++k_it)
+                            wgmma256_v12<1, 1, 1, 0, 0>(d[m_it], &wgmma_sA[k_it * WGMMA_K], &wgmma_sB[k_it * WGMMA_K]);
+                        wgmma_sA += 64 * BM; wgmma_sB += 64 * BN;
+                    }
+                }
+                warpgroup_commit_batch_v12();
+                warpgroup_wait_v12();
+                if (tid < CLUSTERS) arrive_cluster_v12(&empty[qidx], tid);
+                ++qidx;
+            }
+
+            // Remaining K iterations: all use ScaleD=1
+            for (int block_k_iter = 1; block_k_iter < num_blocks_k; ++block_k_iter, ++qidx) {
                 if (qidx == QSIZE) { qidx = 0; p ^= 1; }
                 wait_v12(&full[qidx], p);
                 warpgroup_arrive_v12();
@@ -412,6 +444,7 @@ gemm_v12_stmatrix_kernel(int M, int N, int K,
                 warpgroup_wait_v12();
                 if (tid < CLUSTERS) arrive_cluster_v12(&empty[qidx], tid);
             }
+
             asm volatile("cp.async.bulk.wait_group 0;");
 
             // Use stmatrix for efficient shared memory stores
@@ -702,8 +735,40 @@ gemm_v12_stmatrix_kernel_bf16(int M, int N, int K,
         while (schedule.next(num_block_m, num_block_n)) {
             num_block_n = num_block_n * CLUSTER_N + rank_n;
             num_block_m = num_block_m * CLUSTER_M + rank_m;
-            memset(d, 0, sizeof(d));
-            for (int block_k_iter = 0; block_k_iter < num_blocks_k; ++block_k_iter, ++qidx) {
+
+            // First K iteration: ScaleD=0 for first WGMMA to initialize accumulators
+            {
+                if (qidx == QSIZE) { qidx = 0; p ^= 1; }
+                wait_v12(&full[qidx], p);
+                warpgroup_arrive_v12();
+                #pragma unroll
+                for (int m_it = 0; m_it < B_WG_M / WGMMA_M; ++m_it) {
+                    __nv_bfloat16 *wgmma_sA = sA + qidx * BK * BM + 64 * (m_it + wg_idx * B_WG_M / WGMMA_M) * WGMMA_M;
+                    __nv_bfloat16 *wgmma_sB = sB + qidx * BK * BN;
+                    {
+                        // First WGMMA with ScaleD=0 to initialize accumulator
+                        wgmma256_v12_bf16<0, 1, 1, 0, 0>(d[m_it], &wgmma_sA[0], &wgmma_sB[0]);
+                        #pragma unroll
+                        for (int k_it = 1; k_it < 64 / WGMMA_K; ++k_it)
+                            wgmma256_v12_bf16<1, 1, 1, 0, 0>(d[m_it], &wgmma_sA[k_it * WGMMA_K], &wgmma_sB[k_it * WGMMA_K]);
+                        wgmma_sA += 64 * BM; wgmma_sB += 64 * BN;
+                    }
+                    #pragma unroll
+                    for (int bk = 64; bk < BK; bk += 64) {
+                        #pragma unroll
+                        for (int k_it = 0; k_it < 64 / WGMMA_K; ++k_it)
+                            wgmma256_v12_bf16<1, 1, 1, 0, 0>(d[m_it], &wgmma_sA[k_it * WGMMA_K], &wgmma_sB[k_it * WGMMA_K]);
+                        wgmma_sA += 64 * BM; wgmma_sB += 64 * BN;
+                    }
+                }
+                warpgroup_commit_batch_v12();
+                warpgroup_wait_v12();
+                if (tid < CLUSTERS) arrive_cluster_v12(&empty[qidx], tid);
+                ++qidx;
+            }
+
+            // Remaining K iterations: all use ScaleD=1
+            for (int block_k_iter = 1; block_k_iter < num_blocks_k; ++block_k_iter, ++qidx) {
                 if (qidx == QSIZE) { qidx = 0; p ^= 1; }
                 wait_v12(&full[qidx], p);
                 warpgroup_arrive_v12();
@@ -723,6 +788,7 @@ gemm_v12_stmatrix_kernel_bf16(int M, int N, int K,
                 warpgroup_wait_v12();
                 if (tid < CLUSTERS) arrive_cluster_v12(&empty[qidx], tid);
             }
+
             asm volatile("cp.async.bulk.wait_group 0;");
 
             // Use stmatrix for efficient shared memory stores
