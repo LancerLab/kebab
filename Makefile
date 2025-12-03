@@ -590,7 +590,7 @@ bench-all:
 # Directory for kernel dump (PTX/SASS)
 DUMP_DIR := dump
 
-# Define a template for microbenchmark targets
+# Define a template for microbenchmark targets (with hyphens)
 define MBENCH_TEMPLATE
 mbench-$(1): build
 	@echo "=========================================="
