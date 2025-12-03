@@ -26,6 +26,8 @@ __device__ static inline uint64_t matrix_descriptor_encode(uint64_t x) {
 }
 
 // For 64x16 matrix: stride = 16 (in elements), leading_dim = 64 (in elements)
+// This smem desc is basically equivalent to make smem tensor with smem layout.
+// Just in a low-level approach
 __device__ uint64_t make_smem_desc_wgmma(__half* ptr) {
     uint32_t addr = static_cast<uint32_t>(__cvta_generic_to_shared(ptr));
     uint64_t desc = 0x0000000000000000;

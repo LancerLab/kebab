@@ -23,3 +23,12 @@ target_include_directories(mbench_mma_wgmma PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(mbench_mma_wgmma microbench_common CUDA::cudart)
 set_target_properties(mbench_mma_wgmma PROPERTIES CUDA_ARCHITECTURES OFF)
 
+# MMA.SYNC microbenchmark
+add_executable(mbench_mma_mma_sync
+    mma_mma_sync.cu
+)
+target_include_directories(mbench_mma_mma_sync PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(mbench_mma_mma_sync microbench_common CUDA::cudart)
+set_target_properties(mbench_mma_mma_sync PROPERTIES CUDA_ARCHITECTURES 80)
+target_compile_options(mbench_mma_mma_sync PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-arch=sm_80>)
+

@@ -46,7 +46,7 @@ OPERATORS_TGT := $(subst _,-,$(OPERATORS))
 # ============================================================================
 # Microbenchmarks (Define list for auto-generation of targets)
 # ============================================================================
-MICROBENCHS := copy_gmem_to_smem mma_wgmma
+MICROBENCHS := copy_gmem_to_smem mma_wgmma mma_mma_sync
 # Convert underscores to hyphens for target names
 MICROBENCHS_TGT := $(subst _,-,$(MICROBENCHS))
 
