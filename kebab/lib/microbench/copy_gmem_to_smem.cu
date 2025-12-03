@@ -176,6 +176,84 @@ __global__ void kernel_copy_vectorized(const float* __restrict__ gmem,
 }
 
 /**
+ * Variant 8: PTX version, Vectorized load using float4 (128-bit loads, fully coalesced)
+ *
+ * Each thread loads 8 float4s (32 floats = 128 bytes)
+ * Warp loads: 32 threads * 128 bytes = 4KB per iteration
+ */
+
+__global__ void kernel_copy_vectorized_ptx(const float* __restrict__ gmem,
+                                        float* __restrict__ output,
+                                        int n_elements) {
+    __shared__ float smem[SMEM_ELEMENTS_PER_BLOCK];
+
+    // Calculate this block's data range (aligned to float4 boundaries)
+    int total_elements_per_block = (n_elements + gridDim.x - 1) / gridDim.x;
+    // Align to 4-element boundary for float4
+    total_elements_per_block = ((total_elements_per_block + 3) / 4) * 4;
+    int block_start = blockIdx.x * total_elements_per_block;
+    int block_end = min(block_start + total_elements_per_block, n_elements);
+
+    // Skip if this block is out of range
+    if (block_start >= n_elements) return;
+
+    int n_iters = (total_elements_per_block + SMEM_ELEMENTS_PER_BLOCK - 1) / SMEM_ELEMENTS_PER_BLOCK;
+
+    int tid = threadIdx.x;
+    float4* smem4 = reinterpret_cast<float4*>(smem);
+    constexpr int FLOAT4_PER_THREAD = SMEM_ELEMENTS_PER_THREAD / 4;  // 32/4 = 8
+
+    for (int iter = 0; iter < n_iters; ++iter) {
+        int iter_offset = block_start + iter * SMEM_ELEMENTS_PER_BLOCK;
+        if (iter_offset >= block_end) break;
+
+        const float4* gmem4 = reinterpret_cast<const float4*>(gmem + iter_offset);
+
+        // Vectorized load: 8 float4s per thread (128 bytes)
+        #pragma unroll
+        for (int i = 0; i < FLOAT4_PER_THREAD; ++i) {
+            int idx = tid + i * blockDim.x;
+            int gmem_idx = iter_offset + idx * 4;
+            if (gmem_idx + 3 < n_elements && idx < SMEM_ELEMENTS_PER_BLOCK / 4) {
+                // Use __ldg for cache-friendly load
+                // smem4[idx] = __ldg(&gmem4[idx]);
+                float4 val;
+                asm volatile(
+                    "ld.global.cg.v4.f32 {%0, %1, %2, %3}, [%4]; \n\t"
+                    "st.shared.v4.f32 [%5], {%0, %1, %2, %3}; \n\t"
+                    : "=f"(val.x), "=f"(val.y), "=f"(val.z), "=f"(val.w)
+                    : "l"(gmem4 + idx), "r"((unsigned int)__cvta_generic_to_shared(smem4 + idx))
+                    : "memory"
+                );
+                (void)val;
+            }
+        }
+        __syncthreads();
+
+        // Vectorized store
+        float4* output4 = reinterpret_cast<float4*>(output + iter_offset);
+        #pragma unroll
+        for (int i = 0; i < FLOAT4_PER_THREAD; ++i) {
+            int idx = tid + i * blockDim.x;
+            int gmem_idx = iter_offset + idx * 4;
+            if (gmem_idx + 3 < n_elements && idx < SMEM_ELEMENTS_PER_BLOCK / 4) {
+                // output4[idx] = smem4[idx];
+                float4 val;
+                asm volatile(
+                    "ld.shared.v4.f32 {%0, %1, %2, %3}, [%4]; \n\t"
+                    "st.global.cg.v4.f32 [%5], {%0, %1, %2, %3}; \n\t"
+                    : "=f"(val.x), "=f"(val.y), "=f"(val.z), "=f"(val.w)
+                    : "r"((unsigned int)__cvta_generic_to_shared(smem4 + idx)), "l"(output4 + idx)
+                    : "memory"
+                );
+                (void)val;
+            }
+        }
+        __syncthreads();
+    }
+}
+
+/**
  * Variant 3: Inline PTX with cache hints (ld.global.cg + st.shared)
  *
  * Coalesced access pattern (CORRECT):
@@ -842,6 +920,30 @@ void runBenchmark(size_t data_size_bytes, int num_blocks, MicrobenchRunner& runn
 
         MicrobenchResult result;
         result.variant_name = "Vectorized (float4)";
+        result.description = correct ? "1 float4/thread/iter, stride=256" : "VERIFICATION FAILED";
+        result.data_size_bytes = n_bytes;
+        result.latency_us = latency_us;
+        result.bandwidth_gbps = bw;
+        result.efficiency_pct = (bw / peak_bw) * 100.0f;
+        report.addResult(result);
+    }
+
+    // Variant 8: PTX, Vectorized (float4, 128B per warp)
+    {
+        MBENCH_CUDA_CHECK(cudaMemset(d_output, 0, n_bytes));
+
+        auto kernel = [=] {
+            kernel_copy_vectorized_ptx<<<num_blocks, THREADS_PER_BLOCK>>>(d_input, d_output, n_elements);
+        };
+        float latency_us = runner.measureLatencyUs(kernel);
+        float bw = MicrobenchRunner::calculateBandwidthGBps(total_bytes, latency_us);
+
+        // Verify correctness
+        MBENCH_CUDA_CHECK(cudaMemcpy(h_output.data(), d_output, n_bytes, cudaMemcpyDeviceToHost));
+        bool correct = verifyOutput(h_input.data(), h_output.data(), n_elements, "Vectorized");
+
+        MicrobenchResult result;
+        result.variant_name = "Vectorized (float4) with PTX";
         result.description = correct ? "1 float4/thread/iter, stride=256" : "VERIFICATION FAILED";
         result.data_size_bytes = n_bytes;
         result.latency_us = latency_us;
