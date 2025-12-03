@@ -110,7 +110,7 @@ __device__ void wgmma64_bf16(float d[4][8], __nv_bfloat16* sA, __nv_bfloat16* sB
 
 // template interface for call bf16 or fp16 wgmma and handle its fences
 template<typename T>
-__device__ void wgmma_m64n64k16(__shared__ __half* sA, __shared__ __half* sB, float* out) {
+__device__ void wgmma_m64n64k16(__shared__ __half* sA, __shared__ __half* sB, float out[4][8]) {
     // Single WGMMA operation
     warpgroup_arrive();
     if constexpr (std::is_same_v<T, __nv_bfloat16>) {
@@ -127,7 +127,7 @@ __device__ void wgmma_m64n64k16(__shared__ __half* sA, __shared__ __half* sB, fl
 // ============================================================================
 
 // Test 1: WGMMA 64x64x16 FP16 - single operation
-__global__ void wgmma64_fp16_single(__half* gA, __half* gB, float* output) {
+__global__ void wgmma64_fp16_once(__half* gA, __half* gB, float* output) {
     __shared__ alignas(128) __half sA[64 * 16];  // 64x16
     __shared__ alignas(128) __half sB[16 * 64];  // 16x64
 
@@ -172,11 +172,7 @@ bool verifyOutput(const std::vector<float>& gpu_output, float expected, float to
     return true;
 }
 
-int main() {
-    std::cout << "\n" << std::string(80, '=') << "\n";
-    std::cout << "WGMMA Microbenchmark - Single Operation Verification\n";
-    std::cout << std::string(80, '=') << "\n";
-
+bool run_wgmma64_fp16_once() {
     constexpr int M = 64, N = 64, K_TILE = 16;
     constexpr int NUM_THREADS = 128;
     constexpr int NUM_BLOCKS = 1;
@@ -199,7 +195,7 @@ int main() {
 
     // Run kernel
     std::cout << "\nRunning kernel_wgmma64_fp16_single...\n";
-    wgmma64_fp16_single<<<NUM_BLOCKS, NUM_THREADS>>>(d_A, d_B, d_output);
+    wgmma64_fp16_once<<<NUM_BLOCKS, NUM_THREADS>>>(d_A, d_B, d_output);
     MBENCH_CUDA_CHECK(cudaDeviceSynchronize());
 
     // Copy result back
@@ -212,6 +208,17 @@ int main() {
     MBENCH_CUDA_CHECK(cudaFree(d_A));
     MBENCH_CUDA_CHECK(cudaFree(d_B));
     MBENCH_CUDA_CHECK(cudaFree(d_output));
+
+    return verified;
+}
+
+int main() {
+    std::cout << "\n" << std::string(80, '=') << "\n";
+    std::cout << "WGMMA Microbenchmark - Single Operation Verification\n";
+    std::cout << std::string(80, '=') << "\n";
+    bool verified = true;
+
+    verified &= run_wgmma64_fp16_once();
 
     std::cout << std::string(80, '=') << "\n";
     return verified ? 0 : 1;
