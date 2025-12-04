@@ -128,77 +128,46 @@ __device__ void mma_m16n8k8_f16f32_kernel(float *d, const half *a,
 // Test Kernels
 // ============================================================================
 
-__global__ void mma_m16n8k16_f16f32_once(half* gA, half* gB, float* gC, float* output) {
+__global__ void mma_m16n8k16_f16f32_once(half* gA, half* gB, float* gC, float* gD) {
     __shared__ alignas(128) half sA[16 * 16];
     __shared__ alignas(128) half sB[16 * 8];
     __shared__ alignas(128) float sC[16 * 8];
     __shared__ alignas(128) float sD[16 * 8];
 
     int tid = threadIdx.x;
+    int warp_id = tid / 32;
+    int warp_tid = tid % 32;
+    int warp_offset_A = 16 * 16 * warp_id;
 
     // Load data to shared memory
-    for (int i = tid; i < 16 * 16; i += blockDim.x) sA[i] = gA[i];
-    for (int i = tid; i < 16 * 8; i += blockDim.x) sB[i] = gB[i];
-    for (int i = tid; i < 16 * 8; i += blockDim.x) sC[i] = gC[i];
+    for (int i = warp_tid; i < 16 * 16; i += blockDim.x) sA[i] = gA[warp_offset_A + i];
+    for (int i = warp_tid; i < 16 * 8; i += blockDim.x) sB[i] = gB[i];
+    for (int i = warp_tid; i < 16 * 8; i += blockDim.x) sC[i] = gC[warp_offset_A + i];
     __syncthreads();
 
     // Initialize output
-    for (int i = tid; i < 16 * 8; i += blockDim.x) sD[i] = sC[i];
+    for (int i = warp_tid; i < 16 * 8; i += blockDim.x) sD[i] = sC[i];
     __syncthreads();
 
     // Perform MMA operation
-    if (tid < 32) {
-        int lane_id = tid;
-        unsigned A[4];
-        unsigned B[2];
-        float C[4];
-        float D[4];
-
-        uint32_t a_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(sA));
-        asm volatile(
-            "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];"
-            : "=r"(A[0]), "=r"(A[1]), "=r"(A[2]), "=r"(A[3])
-            : "r"(a_ptr));
-
-        uint32_t b_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(sB));
-        asm volatile("ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {%0, %1}, [%2];"
-                     : "=r"(B[0]), "=r"(B[1])
-                     : "r"(b_ptr));
-
-        int c_idx = (lane_id / 4) * 8 + (lane_id % 4) * 2;
-        C[0] = sC[c_idx];
-        C[1] = sC[c_idx + 1];
-        C[2] = sC[c_idx + 64];
-        C[3] = sC[c_idx + 65];
-
-        asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
-                     " { %0, %1, %2, %3 }, "
-                     " { %4, %5, %6, %7 }, "
-                     " { %8, %9 }, "
-                     " { %10, %11, %12, %13 };"
-                     : "=f"(D[0]), "=f"(D[1]), "=f"(D[2]), "=f"(D[3])
-                     : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "r"(B[0]),
-                       "r"(B[1]), "f"(C[0]), "f"(C[1]), "f"(C[2]), "f"(C[3]));
-
-        sD[c_idx] = D[0];
-        sD[c_idx + 1] = D[1];
-        sD[c_idx + 64] = D[2];
-        sD[c_idx + 65] = D[3];
-    }
+    mma_m16n8k16_f16f32_kernel(sD, sA, sB, sC);
     __syncthreads();
 
     // Copy result to output
-    for (int i = tid; i < 32; i += blockDim.x) output[i] = sD[i];
+    for (int i = warp_tid; i < 16 * 8; i += blockDim.x) gD[warp_offset_A + i] = sD[i];
 }
 
-__global__ void mma_m16n8k16_f16f32_bench(half* gA, half* gB, float* gC, float* output, int iterations) {
+__global__ void mma_m16n8k16_f16f32_bench(half* gA, half* gB, float* gC, float* gD, int iterations) {
     __shared__ alignas(128) half sA[16 * 16];
     __shared__ alignas(128) half sB[16 * 8];
     __shared__ alignas(128) float sC[16 * 8];
     __shared__ alignas(128) float sD[16 * 8];
 
     int tid = threadIdx.x;
-    for (int i = tid; i < 16 * 16; i += blockDim.x) sA[i] = gA[i];
+    int warp_id = tid / 32;
+    int warp_tid = tid % 32;
+    int warp_offset_A = 16 * 16 * warp_id;
+    for (int i = tid; i < 16 * 16; i += blockDim.x) sA[i] = gA[warp_offset_A + i];
     for (int i = tid; i < 16 * 8; i += blockDim.x) sB[i] = gB[i];
     for (int i = tid; i < 16 * 8; i += blockDim.x) sC[i] = gC[i];
     __syncthreads();
@@ -206,50 +175,13 @@ __global__ void mma_m16n8k16_f16f32_bench(half* gA, half* gB, float* gC, float* 
     for (int i = tid; i < 16 * 8; i += blockDim.x) sD[i] = sC[i];
     __syncthreads();
 
-    if (tid < 32) {
-        int lane_id = tid;
-        unsigned A[4];
-        unsigned B[2];
-        float C[4];
-        float D[4];
-
-        uint32_t a_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(sA));
-        uint32_t b_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(sB));
-
-        int c_idx = (lane_id / 4) * 8 + (lane_id % 4) * 2;
-
-        for (int iter = 0; iter < iterations; ++iter) {
-            asm volatile(
-                "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];"
-                : "=r"(A[0]), "=r"(A[1]), "=r"(A[2]), "=r"(A[3])
-                : "r"(a_ptr));
-
-            asm volatile("ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {%0, %1}, [%2];"
-                         : "=r"(B[0]), "=r"(B[1])
-                         : "r"(b_ptr));
-
-            C[0] = sD[c_idx];
-            C[1] = sD[c_idx + 1];
-            C[2] = sD[c_idx + 64];
-            C[3] = sD[c_idx + 65];
-
-            asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
-                         " { %0, %1, %2, %3 }, "
-                         " { %4, %5, %6, %7 }, "
-                         " { %8, %9 }, "
-                         " { %10, %11, %12, %13 };"
-                         : "=f"(D[0]), "=f"(D[1]), "=f"(D[2]), "=f"(D[3])
-                         : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "r"(B[0]),
-                           "r"(B[1]), "f"(C[0]), "f"(C[1]), "f"(C[2]), "f"(C[3]));
-
-            sD[c_idx] = D[0];
-            sD[c_idx + 1] = D[1];
-            sD[c_idx + 64] = D[2];
-            sD[c_idx + 65] = D[3];
-        }
-
-        output[lane_id] = sD[c_idx];
+    for (int iter = 0; iter < iterations; ++iter) {
+        // Perform MMA operation
+        mma_m16n8k16_f16f32_kernel(sD, sA, sB, sC);
+        __syncthreads();
     }
+
+    for (int i = tid; i < 16 * 8; i += blockDim.x) gD[warp_offset_A + i] = sD[i];
 }
 
 // ============================================================================
@@ -271,39 +203,40 @@ bool verifyOutput(const std::vector<float>& gpu_output, float expected, float to
 }
 
 bool run_mma_m16n8k16_f16f32_once() {
-    constexpr int M = 16, N = 8, K = 16;
-    constexpr int NUM_THREADS = 32;
+    constexpr int M = 64, N = 8, K = 16;
+    constexpr int NUM_THREADS = 128;
     constexpr int NUM_BLOCKS = 1;
-    
-    std::vector<half> h_A(M * K, __float2half(1.0f));
-    std::vector<half> h_B(K * N, __float2half(1.0f));
-    std::vector<float> h_C(M * N, 0.0f);
-    std::vector<float> h_output(32);
-    
-    half *d_A, *d_B;
+    constexpr int OUTPUT_SIZE = NUM_THREADS;  // 4 floats per thread
+
+    std::vector<__half> h_A(M * K, __float2half(1.0f));
+    std::vector<__half> h_B(K * N, __float2half(1.0f));
+    std::vector<__half> h_C(M * N, __float2half(0.0f));
+    std::vector<float> h_output(OUTPUT_SIZE);
+
+    __half *d_A, *d_B;
     float *d_C, *d_output;
     MBENCH_CUDA_CHECK(cudaMalloc(&d_A, M * K * sizeof(half)));
     MBENCH_CUDA_CHECK(cudaMalloc(&d_B, K * N * sizeof(half)));
     MBENCH_CUDA_CHECK(cudaMalloc(&d_C, M * N * sizeof(float)));
-    MBENCH_CUDA_CHECK(cudaMalloc(&d_output, 32 * sizeof(float)));
-    
+    MBENCH_CUDA_CHECK(cudaMalloc(&d_output, OUTPUT_SIZE * sizeof(float)));
+
     MBENCH_CUDA_CHECK(cudaMemcpy(d_A, h_A.data(), M * K * sizeof(half), cudaMemcpyHostToDevice));
     MBENCH_CUDA_CHECK(cudaMemcpy(d_B, h_B.data(), K * N * sizeof(half), cudaMemcpyHostToDevice));
     MBENCH_CUDA_CHECK(cudaMemcpy(d_C, h_C.data(), M * N * sizeof(float), cudaMemcpyHostToDevice));
-    
+
     std::cout << "\nRunning mma_m16n8k16_f16f32_once...\n";
     mma_m16n8k16_f16f32_once<<<NUM_BLOCKS, NUM_THREADS>>>(d_A, d_B, d_C, d_output);
     MBENCH_CUDA_CHECK(cudaDeviceSynchronize());
-    
-    MBENCH_CUDA_CHECK(cudaMemcpy(h_output.data(), d_output, 32 * sizeof(float), cudaMemcpyDeviceToHost));
-    
+
+    MBENCH_CUDA_CHECK(cudaMemcpy(h_output.data(), d_output, OUTPUT_SIZE * sizeof(float), cudaMemcpyDeviceToHost));
+
     bool verified = verifyOutput(h_output, 16.0f);
-    
+
     MBENCH_CUDA_CHECK(cudaFree(d_A));
     MBENCH_CUDA_CHECK(cudaFree(d_B));
     MBENCH_CUDA_CHECK(cudaFree(d_C));
     MBENCH_CUDA_CHECK(cudaFree(d_output));
-    
+
     return verified;
 }
 
@@ -312,70 +245,73 @@ bool bench_mma_m16n8k16_f16f32() {
     constexpr int NUM_THREADS = 32;
     constexpr int NUM_BLOCKS = 1;
     constexpr int ITERATIONS = 10000;
-    
+
     std::vector<half> h_A(M * K, __float2half(1.0f));
     std::vector<half> h_B(K * N, __float2half(1.0f));
     std::vector<float> h_C(M * N, 0.0f);
-    std::vector<float> h_output(32);
-    
+    std::vector<float> h_output(M * N);
+
     half *d_A, *d_B;
     float *d_C, *d_output;
     MBENCH_CUDA_CHECK(cudaMalloc(&d_A, M * K * sizeof(half)));
     MBENCH_CUDA_CHECK(cudaMalloc(&d_B, K * N * sizeof(half)));
     MBENCH_CUDA_CHECK(cudaMalloc(&d_C, M * N * sizeof(float)));
-    MBENCH_CUDA_CHECK(cudaMalloc(&d_output, 32 * sizeof(float)));
-    
+    MBENCH_CUDA_CHECK(cudaMalloc(&d_output, M * N * sizeof(float)));
+
     MBENCH_CUDA_CHECK(cudaMemcpy(d_A, h_A.data(), M * K * sizeof(half), cudaMemcpyHostToDevice));
     MBENCH_CUDA_CHECK(cudaMemcpy(d_B, h_B.data(), K * N * sizeof(half), cudaMemcpyHostToDevice));
     MBENCH_CUDA_CHECK(cudaMemcpy(d_C, h_C.data(), M * N * sizeof(float), cudaMemcpyHostToDevice));
-    
+
     mma_m16n8k16_f16f32_bench<<<NUM_BLOCKS, NUM_THREADS>>>(d_A, d_B, d_C, d_output, 10);
     MBENCH_CUDA_CHECK(cudaDeviceSynchronize());
-    
+
     cudaEvent_t start, stop;
     MBENCH_CUDA_CHECK(cudaEventCreate(&start));
     MBENCH_CUDA_CHECK(cudaEventCreate(&stop));
-    
+
     MBENCH_CUDA_CHECK(cudaEventRecord(start));
     mma_m16n8k16_f16f32_bench<<<NUM_BLOCKS, NUM_THREADS>>>(d_A, d_B, d_C, d_output, ITERATIONS);
     MBENCH_CUDA_CHECK(cudaEventRecord(stop));
     MBENCH_CUDA_CHECK(cudaEventSynchronize(stop));
-    
+
     float elapsed_ms = 0.0f;
     MBENCH_CUDA_CHECK(cudaEventElapsedTime(&elapsed_ms, start, stop));
-    
-    MBENCH_CUDA_CHECK(cudaMemcpy(h_output.data(), d_output, 32 * sizeof(float), cudaMemcpyDeviceToHost));
-    
+
+    MBENCH_CUDA_CHECK(cudaMemcpy(h_output.data(), d_output, M * N * sizeof(float), cudaMemcpyDeviceToHost));
+
     double total_ops = 2.0 * M * N * K * ITERATIONS;
     double elapsed_sec = elapsed_ms / 1000.0;
     double throughput_tflops = (total_ops / 1e12) / elapsed_sec;
-    
+
     std::cout << "\nBenchmark Results (mma_m16n8k16_f16f32_bench):\n";
     std::cout << "  Iterations: " << ITERATIONS << "\n";
     std::cout << "  Elapsed time: " << elapsed_ms << " ms\n";
     std::cout << "  Total operations: " << total_ops / 1e9 << " G ops\n";
     std::cout << "  Throughput: " << throughput_tflops << " TFLOPS\n";
-    
+
     MBENCH_CUDA_CHECK(cudaEventDestroy(start));
     MBENCH_CUDA_CHECK(cudaEventDestroy(stop));
     MBENCH_CUDA_CHECK(cudaFree(d_A));
     MBENCH_CUDA_CHECK(cudaFree(d_B));
     MBENCH_CUDA_CHECK(cudaFree(d_C));
     MBENCH_CUDA_CHECK(cudaFree(d_output));
-    
+
     return true;
 }
 
-__global__ void mma_m16n8k8_f16f32_once(half* gA, half* gB, float* gC, float* output) {
+__global__ void mma_m16n8k8_f16f32_once(half* gA, half* gB, float* gC, float* gD) {
     __shared__ alignas(128) half sA[16 * 8];
     __shared__ alignas(128) half sB[8 * 8];
     __shared__ alignas(128) float sC[16 * 8];
     __shared__ alignas(128) float sD[16 * 8];
 
     int tid = threadIdx.x;
+    int warp_id = tid / 32;
+    int warp_tid = tid % 32;
+    int warp_offset_A = 16 * 8 * warp_id;
 
     // Load data to shared memory
-    for (int i = tid; i < 16 * 8; i += blockDim.x) sA[i] = gA[i];
+    for (int i = tid; i < 16 * 8; i += blockDim.x) sA[i] = gA[warp_offset_A + i];
     for (int i = tid; i < 8 * 8; i += blockDim.x) sB[i] = gB[i];
     for (int i = tid; i < 16 * 8; i += blockDim.x) sC[i] = gC[i];
     __syncthreads();
@@ -385,57 +321,24 @@ __global__ void mma_m16n8k8_f16f32_once(half* gA, half* gB, float* gC, float* ou
     __syncthreads();
 
     // Perform MMA operation
-    if (tid < 32) {
-        int lane_id = tid;
-        unsigned A[2];
-        unsigned B[1];
-        float C[4];
-        float D[4];
-
-        uint32_t a_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(sA));
-        asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];"
-                     : "=r"(A[0]), "=r"(A[1])
-                     : "r"(a_ptr));
-
-        uint32_t b_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(sB));
-        asm volatile("ldmatrix.sync.aligned.m8n8.x1.trans.shared.b16 {%0}, [%1];"
-                     : "=r"(B[0])
-                     : "r"(b_ptr));
-
-        int c_idx = (lane_id / 4) * 8 + (lane_id % 4) * 2;
-        C[0] = sC[c_idx];
-        C[1] = sC[c_idx + 1];
-        C[2] = sC[c_idx + 32];
-        C[3] = sC[c_idx + 33];
-
-        asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 "
-                     " { %0, %1, %2, %3 }, "
-                     " { %4, %5 }, "
-                     " { %6 }, "
-                     " { %7, %8, %9, %10 };"
-                     : "=f"(D[0]), "=f"(D[1]), "=f"(D[2]), "=f"(D[3])
-                     : "r"(A[0]), "r"(A[1]), "r"(B[0]), "f"(C[0]), "f"(C[1]),
-                       "f"(C[2]), "f"(C[3]));
-
-        sD[c_idx] = D[0];
-        sD[c_idx + 1] = D[1];
-        sD[c_idx + 32] = D[2];
-        sD[c_idx + 33] = D[3];
-    }
+    mma_m16n8k8_f16f32_kernel(sD, sA, sB, sC);
     __syncthreads();
 
     // Copy result to output
-    for (int i = tid; i < 32; i += blockDim.x) output[i] = sD[i];
+    for (int i = tid; i < 16 * 8; i += blockDim.x) gD[warp_offset_A + i] = sD[i];
 }
 
-__global__ void mma_m16n8k8_f16f32_bench(half* gA, half* gB, float* gC, float* output, int iterations) {
+__global__ void mma_m16n8k8_f16f32_bench(half* gA, half* gB, float* gC, float* gD, int iterations) {
     __shared__ alignas(128) half sA[16 * 8];
     __shared__ alignas(128) half sB[8 * 8];
     __shared__ alignas(128) float sC[16 * 8];
     __shared__ alignas(128) float sD[16 * 8];
 
     int tid = threadIdx.x;
-    for (int i = tid; i < 16 * 8; i += blockDim.x) sA[i] = gA[i];
+    int warp_id = tid / 32;
+    int warp_tid = tid % 32;
+    int warp_offset_A = 16 * 8 * warp_id;
+    for (int i = tid; i < 16 * 8; i += blockDim.x) sA[i] = gA[warp_offset_A + i];
     for (int i = tid; i < 8 * 8; i += blockDim.x) sB[i] = gB[i];
     for (int i = tid; i < 16 * 8; i += blockDim.x) sC[i] = gC[i];
     __syncthreads();
@@ -443,67 +346,32 @@ __global__ void mma_m16n8k8_f16f32_bench(half* gA, half* gB, float* gC, float* o
     for (int i = tid; i < 16 * 8; i += blockDim.x) sD[i] = sC[i];
     __syncthreads();
 
-    if (tid < 32) {
-        int lane_id = tid;
-        unsigned A[2];
-        unsigned B[1];
-        float C[4];
-        float D[4];
-
-        uint32_t a_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(sA));
-        uint32_t b_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(sB));
-
-        int c_idx = (lane_id / 4) * 8 + (lane_id % 4) * 2;
-
-        for (int iter = 0; iter < iterations; ++iter) {
-            asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];"
-                         : "=r"(A[0]), "=r"(A[1])
-                         : "r"(a_ptr));
-
-            asm volatile("ldmatrix.sync.aligned.m8n8.x1.trans.shared.b16 {%0}, [%1];"
-                         : "=r"(B[0])
-                         : "r"(b_ptr));
-
-            C[0] = sD[c_idx];
-            C[1] = sD[c_idx + 1];
-            C[2] = sD[c_idx + 32];
-            C[3] = sD[c_idx + 33];
-
-            asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 "
-                         " { %0, %1, %2, %3 }, "
-                         " { %4, %5 }, "
-                         " { %6 }, "
-                         " { %7, %8, %9, %10 };"
-                         : "=f"(D[0]), "=f"(D[1]), "=f"(D[2]), "=f"(D[3])
-                         : "r"(A[0]), "r"(A[1]), "r"(B[0]), "f"(C[0]), "f"(C[1]),
-                           "f"(C[2]), "f"(C[3]));
-
-            sD[c_idx] = D[0];
-            sD[c_idx + 1] = D[1];
-            sD[c_idx + 32] = D[2];
-            sD[c_idx + 33] = D[3];
-        }
-
-        output[lane_id] = sD[c_idx];
+    for (int iter = 0; iter < iterations; ++iter) {
+        // Perform MMA operation
+        mma_m16n8k8_f16f32_kernel(sD, sA, sB, sC);
+        __syncthreads();
     }
+
+    for (int i = tid; i < 16 * 8; i += blockDim.x) gD[warp_offset_A + i] = sD[i];
 }
 
 bool run_mma_m16n8k8_f16f32_once() {
     constexpr int M = 16, N = 8, K = 8;
     constexpr int NUM_THREADS = 32;
     constexpr int NUM_BLOCKS = 1;
+    constexpr int OUTPUT_SIZE = NUM_THREADS;  // 4 floats per thread
 
-    std::vector<half> h_A(M * K, __float2half(1.0f));
-    std::vector<half> h_B(K * N, __float2half(1.0f));
-    std::vector<float> h_C(M * N, 0.0f);
-    std::vector<float> h_output(32);
+    std::vector<__half> h_A(M * K, __float2half(1.0f));
+    std::vector<__half> h_B(K * N, __float2half(1.0f));
+    std::vector<__half> h_C(M * N, __float2half(0.0f));
+    std::vector<float> h_output(OUTPUT_SIZE);
 
-    half *d_A, *d_B;
+    __half *d_A, *d_B;
     float *d_C, *d_output;
     MBENCH_CUDA_CHECK(cudaMalloc(&d_A, M * K * sizeof(half)));
     MBENCH_CUDA_CHECK(cudaMalloc(&d_B, K * N * sizeof(half)));
     MBENCH_CUDA_CHECK(cudaMalloc(&d_C, M * N * sizeof(float)));
-    MBENCH_CUDA_CHECK(cudaMalloc(&d_output, 32 * sizeof(float)));
+    MBENCH_CUDA_CHECK(cudaMalloc(&d_output, OUTPUT_SIZE * sizeof(float)));
 
     MBENCH_CUDA_CHECK(cudaMemcpy(d_A, h_A.data(), M * K * sizeof(half), cudaMemcpyHostToDevice));
     MBENCH_CUDA_CHECK(cudaMemcpy(d_B, h_B.data(), K * N * sizeof(half), cudaMemcpyHostToDevice));
@@ -513,7 +381,7 @@ bool run_mma_m16n8k8_f16f32_once() {
     mma_m16n8k8_f16f32_once<<<NUM_BLOCKS, NUM_THREADS>>>(d_A, d_B, d_C, d_output);
     MBENCH_CUDA_CHECK(cudaDeviceSynchronize());
 
-    MBENCH_CUDA_CHECK(cudaMemcpy(h_output.data(), d_output, 32 * sizeof(float), cudaMemcpyDeviceToHost));
+    MBENCH_CUDA_CHECK(cudaMemcpy(h_output.data(), d_output, OUTPUT_SIZE * sizeof(float), cudaMemcpyDeviceToHost));
 
     bool verified = verifyOutput(h_output, 8.0f);
 
@@ -526,22 +394,22 @@ bool run_mma_m16n8k8_f16f32_once() {
 }
 
 bool bench_mma_m16n8k8_f16f32() {
-    constexpr int M = 16, N = 8, K = 8;
-    constexpr int NUM_THREADS = 32;
+    constexpr int M = 32, N = 8, K = 8;
+    constexpr int NUM_THREADS = 64;
     constexpr int NUM_BLOCKS = 1;
     constexpr int ITERATIONS = 10000;
 
     std::vector<half> h_A(M * K, __float2half(1.0f));
     std::vector<half> h_B(K * N, __float2half(1.0f));
     std::vector<float> h_C(M * N, 0.0f);
-    std::vector<float> h_output(32);
+    std::vector<float> h_output(M * N);
 
     half *d_A, *d_B;
     float *d_C, *d_output;
     MBENCH_CUDA_CHECK(cudaMalloc(&d_A, M * K * sizeof(half)));
     MBENCH_CUDA_CHECK(cudaMalloc(&d_B, K * N * sizeof(half)));
     MBENCH_CUDA_CHECK(cudaMalloc(&d_C, M * N * sizeof(float)));
-    MBENCH_CUDA_CHECK(cudaMalloc(&d_output, 32 * sizeof(float)));
+    MBENCH_CUDA_CHECK(cudaMalloc(&d_output, M * N * sizeof(float)));
 
     MBENCH_CUDA_CHECK(cudaMemcpy(d_A, h_A.data(), M * K * sizeof(half), cudaMemcpyHostToDevice));
     MBENCH_CUDA_CHECK(cudaMemcpy(d_B, h_B.data(), K * N * sizeof(half), cudaMemcpyHostToDevice));
@@ -562,7 +430,7 @@ bool bench_mma_m16n8k8_f16f32() {
     float elapsed_ms = 0.0f;
     MBENCH_CUDA_CHECK(cudaEventElapsedTime(&elapsed_ms, start, stop));
 
-    MBENCH_CUDA_CHECK(cudaMemcpy(h_output.data(), d_output, 32 * sizeof(float), cudaMemcpyDeviceToHost));
+    MBENCH_CUDA_CHECK(cudaMemcpy(h_output.data(), d_output, M * N * sizeof(float), cudaMemcpyDeviceToHost));
 
     double total_ops = 2.0 * M * N * K * ITERATIONS;
     double elapsed_sec = elapsed_ms / 1000.0;
