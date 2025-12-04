@@ -32,3 +32,11 @@ target_link_libraries(mbench_mma_mma_sync microbench_common CUDA::cudart)
 set_target_properties(mbench_mma_mma_sync PROPERTIES CUDA_ARCHITECTURES 80)
 target_compile_options(mbench_mma_mma_sync PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-arch=sm_80>)
 
+# WMMA.SYNC microbenchmark
+add_executable(mbench_mma_wmma_sync
+    mma_wmma_sync.cu
+)
+target_include_directories(mbench_mma_wmma_sync PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(mbench_mma_wmma_sync microbench_common CUDA::cudart)
+set_target_properties(mbench_mma_wmma_sync PROPERTIES CUDA_ARCHITECTURES 80)
+target_compile_options(mbench_mma_wmma_sync PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-arch=sm_80>)
