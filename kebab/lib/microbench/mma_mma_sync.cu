@@ -13,13 +13,14 @@
 #include <cstring>
 #include <vector>
 #include <iostream>
+#include <iomanip>
 #include <cmath>
 #include <type_traits>
 
 using namespace kebab::microbench;
 
 // ============================================================================
-// MMA.SYNC Wrapper Functions
+// MMA.SYNC Wrapper Functions for Inner Device Kernel
 // ============================================================================
 
 // Simple MMA m16n8k16 for FP16 (produces FP32 accumulator)
@@ -84,26 +85,31 @@ __device__ void mma_m16n8k8_f16f32_kernel(float *d, const half *a,
     float C[4];
     float D[4];
 
-    // Load A matrix (16x8 matrix)
-    uint32_t a_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(a));
+    // Load A matrix (16x8 matrix) - need to load two 8x8 blocks
+    // First block at offset 0
+    int lorr_id = lane_id % 16;
+    const half *a_new = a + lorr_id * 8;
+    uint32_t a_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(a_new));
 
     asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];"
                  : "=r"(A[0]), "=r"(A[1])
                  : "r"(a_ptr));
 
     // Load B matrix (8x8 matrix)
-    uint32_t b_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(b));
+    int uord_id = lane_id % 8;
+    const half *b_new = b + uord_id * 8;
+    uint32_t b_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(b_new));
 
     asm volatile("ldmatrix.sync.aligned.m8n8.x1.trans.shared.b16 {%0}, [%1];"
                  : "=r"(B[0])
                  : "r"(b_ptr));
 
-    // Load C matrix
+    // Load C matrix (16x8 matrix)
     int c_idx = (lane_id / 4) * 8 + (lane_id % 4) * 2;
     C[0] = c[c_idx];
     C[1] = c[c_idx + 1];
-    C[2] = c[c_idx + 32];
-    C[3] = c[c_idx + 33];
+    C[2] = c[c_idx + 64];
+    C[3] = c[c_idx + 65];
 
     // Perform MMA operation
     asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 "
@@ -118,70 +124,73 @@ __device__ void mma_m16n8k8_f16f32_kernel(float *d, const half *a,
     // Store result
     d[c_idx] = D[0];
     d[c_idx + 1] = D[1];
-    d[c_idx + 32] = D[2];
-    d[c_idx + 33] = D[3];
+    d[c_idx + 64] = D[2];
+    d[c_idx + 65] = D[3];
 }
 
 
 
 // ============================================================================
-// Test Kernels
+// Device Kernels Outer
 // ============================================================================
 
-__global__ void mma_m16n8k16_f16f32_once(half* gA, half* gB, float* gC, float* gD) {
+// For sake of convenience, we do not consider tiling and only use 1 warp
+// In real case, we need to consider tiling by warps to fit mma contract
+// M = 16, N = 8, K = 16
+__global__ void mma_m16n8k16_f16f32(half* gA, half* gB, float* gC, float* gD, int iteration=1) {
     __shared__ alignas(128) half sA[16 * 16];
     __shared__ alignas(128) half sB[16 * 8];
     __shared__ alignas(128) float sC[16 * 8];
     __shared__ alignas(128) float sD[16 * 8];
 
     int tid = threadIdx.x;
-    int warp_id = tid / 32;
-    int warp_tid = tid % 32;
-    int warp_offset_A = 16 * 16 * warp_id;
 
     // Load data to shared memory
-    for (int i = warp_tid; i < 16 * 16; i += blockDim.x) sA[i] = gA[warp_offset_A + i];
-    for (int i = warp_tid; i < 16 * 8; i += blockDim.x) sB[i] = gB[i];
-    for (int i = warp_tid; i < 16 * 8; i += blockDim.x) sC[i] = gC[warp_offset_A + i];
+    // when copy data from global to shared, we do not use warpgroup
+    // instead, we use thread, each thread copy total elements / blockDim.x
+    for (int i = tid; i < 16 * 16; i += 16 * 16 / blockDim.x) sA[i] = gA[i];
+    for (int i = tid; i < 16 * 8; i += 16 * 8 / blockDim.x) sB[i] = gB[i];
+    for (int i = tid; i < 16 * 8; i += 16 * 8 / blockDim.x) sC[i] = gC[i];
     __syncthreads();
 
     // Initialize output
-    for (int i = warp_tid; i < 16 * 8; i += blockDim.x) sD[i] = sC[i];
+    for (int i = tid; i < 16 * 8; i += 16 * 8 / blockDim.x) sD[i] = sC[i];
     __syncthreads();
 
     // Perform MMA operation
-    mma_m16n8k16_f16f32_kernel(sD, sA, sB, sC);
-    __syncthreads();
+    for (int i = 0; i < iteration; ++i) {
+        mma_m16n8k16_f16f32_kernel(sD, sA, sB, sC);
+    }
 
     // Copy result to output
-    for (int i = warp_tid; i < 16 * 8; i += blockDim.x) gD[warp_offset_A + i] = sD[i];
+    for (int i = tid; i < 16 * 8; i += 16 * 8 / blockDim.x) gD[i] = sD[i];
 }
 
-__global__ void mma_m16n8k16_f16f32_bench(half* gA, half* gB, float* gC, float* gD, int iterations) {
-    __shared__ alignas(128) half sA[16 * 16];
-    __shared__ alignas(128) half sB[16 * 8];
+__global__ void mma_m16n8k8_f16f32(half* gA, half* gB, float* gC, float* gD, int iteration=1) {
+    __shared__ alignas(128) half sA[16 * 8];
+    __shared__ alignas(128) half sB[8 * 8];
     __shared__ alignas(128) float sC[16 * 8];
     __shared__ alignas(128) float sD[16 * 8];
 
     int tid = threadIdx.x;
-    int warp_id = tid / 32;
-    int warp_tid = tid % 32;
-    int warp_offset_A = 16 * 16 * warp_id;
-    for (int i = tid; i < 16 * 16; i += blockDim.x) sA[i] = gA[warp_offset_A + i];
-    for (int i = tid; i < 16 * 8; i += blockDim.x) sB[i] = gB[i];
-    for (int i = tid; i < 16 * 8; i += blockDim.x) sC[i] = gC[i];
+
+    // Load data to shared memory
+    for (int i = tid; i < 16 * 8; i += 16 * 8 / blockDim.x) sA[i] = gA[i];
+    for (int i = tid; i < 8 * 8; i += 8 * 8 / blockDim.x) sB[i] = gB[i];
+    for (int i = tid; i < 16 * 8; i += 16 * 8 / blockDim.x) sC[i] = gC[i];
     __syncthreads();
 
-    for (int i = tid; i < 16 * 8; i += blockDim.x) sD[i] = sC[i];
+    // Initialize output
+    for (int i = tid; i < 16 * 8; i += 16 * 8 / blockDim.x) sD[i] = sC[i];
     __syncthreads();
 
-    for (int iter = 0; iter < iterations; ++iter) {
-        // Perform MMA operation
-        mma_m16n8k16_f16f32_kernel(sD, sA, sB, sC);
-        __syncthreads();
+    // Perform MMA operation
+    for (int i = 0; i < iteration; ++i) {
+        mma_m16n8k8_f16f32_kernel(sD, sA, sB, sC);
     }
 
-    for (int i = tid; i < 16 * 8; i += blockDim.x) gD[warp_offset_A + i] = sD[i];
+    // Copy result to output
+    for (int i = tid; i < 16 * 8; i += 16 * 8 / blockDim.x) gD[i] = sD[i];
 }
 
 // ============================================================================
@@ -190,65 +199,34 @@ __global__ void mma_m16n8k16_f16f32_bench(half* gA, half* gB, float* gC, float* 
 
 bool verifyOutput(const std::vector<float>& gpu_output, float expected, float tolerance = 0.5f) {
     std::cout << "Verification: checking " << gpu_output.size() << " outputs\n";
+    int fail_count = 0;
     for (size_t i = 0; i < gpu_output.size(); ++i) {
         float diff = std::abs(gpu_output[i] - expected);
         if (diff > tolerance) {
-            std::cerr << "FAILED at [" << i << "]: expected " << expected
-                      << ", got " << gpu_output[i] << "\n";
-            return false;
+            if (fail_count < 10) {  // Print first 10 failures
+                std::cerr << "FAILED at [" << i << "]: expected " << expected
+                          << ", got " << gpu_output[i] << "\n";
+            }
+            fail_count++;
         }
+    }
+    if (fail_count > 0) {
+        std::cerr << "Total failures: " << fail_count << " out of " << gpu_output.size() << "\n";
+        return false;
     }
     std::cout << "PASSED: all outputs match expected value " << expected << "\n";
     return true;
 }
 
-bool run_mma_m16n8k16_f16f32_once() {
-    constexpr int M = 64, N = 8, K = 16;
-    constexpr int NUM_THREADS = 128;
-    constexpr int NUM_BLOCKS = 1;
-    constexpr int OUTPUT_SIZE = NUM_THREADS;  // 4 floats per thread
-
-    std::vector<__half> h_A(M * K, __float2half(1.0f));
-    std::vector<__half> h_B(K * N, __float2half(1.0f));
-    std::vector<__half> h_C(M * N, __float2half(0.0f));
-    std::vector<float> h_output(OUTPUT_SIZE);
-
-    __half *d_A, *d_B;
-    float *d_C, *d_output;
-    MBENCH_CUDA_CHECK(cudaMalloc(&d_A, M * K * sizeof(half)));
-    MBENCH_CUDA_CHECK(cudaMalloc(&d_B, K * N * sizeof(half)));
-    MBENCH_CUDA_CHECK(cudaMalloc(&d_C, M * N * sizeof(float)));
-    MBENCH_CUDA_CHECK(cudaMalloc(&d_output, OUTPUT_SIZE * sizeof(float)));
-
-    MBENCH_CUDA_CHECK(cudaMemcpy(d_A, h_A.data(), M * K * sizeof(half), cudaMemcpyHostToDevice));
-    MBENCH_CUDA_CHECK(cudaMemcpy(d_B, h_B.data(), K * N * sizeof(half), cudaMemcpyHostToDevice));
-    MBENCH_CUDA_CHECK(cudaMemcpy(d_C, h_C.data(), M * N * sizeof(float), cudaMemcpyHostToDevice));
-
-    std::cout << "\nRunning mma_m16n8k16_f16f32_once...\n";
-    mma_m16n8k16_f16f32_once<<<NUM_BLOCKS, NUM_THREADS>>>(d_A, d_B, d_C, d_output);
-    MBENCH_CUDA_CHECK(cudaDeviceSynchronize());
-
-    MBENCH_CUDA_CHECK(cudaMemcpy(h_output.data(), d_output, OUTPUT_SIZE * sizeof(float), cudaMemcpyDeviceToHost));
-
-    bool verified = verifyOutput(h_output, 16.0f);
-
-    MBENCH_CUDA_CHECK(cudaFree(d_A));
-    MBENCH_CUDA_CHECK(cudaFree(d_B));
-    MBENCH_CUDA_CHECK(cudaFree(d_C));
-    MBENCH_CUDA_CHECK(cudaFree(d_output));
-
-    return verified;
-}
-
-bool bench_mma_m16n8k16_f16f32() {
+bool run_mma_m16n8k16_f16f32(bool bench=false) {
     constexpr int M = 16, N = 8, K = 16;
     constexpr int NUM_THREADS = 32;
     constexpr int NUM_BLOCKS = 1;
-    constexpr int ITERATIONS = 10000;
+    constexpr int ITERATIONS = 100000;
 
     std::vector<half> h_A(M * K, __float2half(1.0f));
     std::vector<half> h_B(K * N, __float2half(1.0f));
-    std::vector<float> h_C(M * N, 0.0f);
+    std::vector<float> h_C(M * N, 11.0f);
     std::vector<float> h_output(M * N);
 
     half *d_A, *d_B;
@@ -262,35 +240,45 @@ bool bench_mma_m16n8k16_f16f32() {
     MBENCH_CUDA_CHECK(cudaMemcpy(d_B, h_B.data(), K * N * sizeof(half), cudaMemcpyHostToDevice));
     MBENCH_CUDA_CHECK(cudaMemcpy(d_C, h_C.data(), M * N * sizeof(float), cudaMemcpyHostToDevice));
 
-    mma_m16n8k16_f16f32_bench<<<NUM_BLOCKS, NUM_THREADS>>>(d_A, d_B, d_C, d_output, 10);
-    MBENCH_CUDA_CHECK(cudaDeviceSynchronize());
+    if (bench) {
+        mma_m16n8k16_f16f32<<<NUM_BLOCKS, NUM_THREADS>>>(d_A, d_B, d_C, d_output, 10);
+        MBENCH_CUDA_CHECK(cudaDeviceSynchronize());
+        cudaEvent_t start, stop;
+        MBENCH_CUDA_CHECK(cudaEventCreate(&start));
+        MBENCH_CUDA_CHECK(cudaEventCreate(&stop));
 
-    cudaEvent_t start, stop;
-    MBENCH_CUDA_CHECK(cudaEventCreate(&start));
-    MBENCH_CUDA_CHECK(cudaEventCreate(&stop));
+        MBENCH_CUDA_CHECK(cudaEventRecord(start));
+        mma_m16n8k16_f16f32<<<NUM_BLOCKS, NUM_THREADS>>>(d_A, d_B, d_C, d_output, ITERATIONS);
+        MBENCH_CUDA_CHECK(cudaEventRecord(stop));
+        MBENCH_CUDA_CHECK(cudaEventSynchronize(stop));
 
-    MBENCH_CUDA_CHECK(cudaEventRecord(start));
-    mma_m16n8k16_f16f32_bench<<<NUM_BLOCKS, NUM_THREADS>>>(d_A, d_B, d_C, d_output, ITERATIONS);
-    MBENCH_CUDA_CHECK(cudaEventRecord(stop));
-    MBENCH_CUDA_CHECK(cudaEventSynchronize(stop));
+        float elapsed_ms = 0.0f;
+        MBENCH_CUDA_CHECK(cudaEventElapsedTime(&elapsed_ms, start, stop));
 
-    float elapsed_ms = 0.0f;
-    MBENCH_CUDA_CHECK(cudaEventElapsedTime(&elapsed_ms, start, stop));
+        MBENCH_CUDA_CHECK(cudaMemcpy(h_output.data(), d_output, M * N * sizeof(float), cudaMemcpyDeviceToHost));
 
-    MBENCH_CUDA_CHECK(cudaMemcpy(h_output.data(), d_output, M * N * sizeof(float), cudaMemcpyDeviceToHost));
+        double total_ops = 2.0 * M * N * K * ITERATIONS;
+        double elapsed_us = elapsed_ms * 1000.0;
+        double throughput_tflops = (total_ops / 1e6) / elapsed_us;
+        double throughput_gflops = (total_ops / 1e3) / elapsed_us;
+        std::cout << "\nBenchmark Results (mma_m16n8k16_f16f32_bench):\n";
+        std::cout << "  Iterations: " << ITERATIONS << "\n";
+        std::cout << std::fixed << std::setprecision(6);
+        std::cout << "  Elapsed time: " << elapsed_ms << " ms\n";
+        std::cout << "  Total operations: " << total_ops / 1e9 << " G ops\n";
+        std::cout << "  Throughput: " << throughput_tflops << " TFLOPS";
+        std::cout << " (" << throughput_gflops << " GFLOPS)\n";
+        MBENCH_CUDA_CHECK(cudaEventDestroy(start));
+        MBENCH_CUDA_CHECK(cudaEventDestroy(stop));
+    } else {
+        std::cout << "\nRunning mma_m16n8k16_f16f32_once...\n";
+        mma_m16n8k16_f16f32<<<NUM_BLOCKS, NUM_THREADS>>>(d_A, d_B, d_C, d_output);
+        MBENCH_CUDA_CHECK(cudaDeviceSynchronize());
+        MBENCH_CUDA_CHECK(cudaMemcpy(h_output.data(), d_output, M * N * sizeof(float), cudaMemcpyDeviceToHost));
+        bool verified = verifyOutput(h_output, 27.0f);
+        return verified;
+    }
 
-    double total_ops = 2.0 * M * N * K * ITERATIONS;
-    double elapsed_sec = elapsed_ms / 1000.0;
-    double throughput_tflops = (total_ops / 1e12) / elapsed_sec;
-
-    std::cout << "\nBenchmark Results (mma_m16n8k16_f16f32_bench):\n";
-    std::cout << "  Iterations: " << ITERATIONS << "\n";
-    std::cout << "  Elapsed time: " << elapsed_ms << " ms\n";
-    std::cout << "  Total operations: " << total_ops / 1e9 << " G ops\n";
-    std::cout << "  Throughput: " << throughput_tflops << " TFLOPS\n";
-
-    MBENCH_CUDA_CHECK(cudaEventDestroy(start));
-    MBENCH_CUDA_CHECK(cudaEventDestroy(stop));
     MBENCH_CUDA_CHECK(cudaFree(d_A));
     MBENCH_CUDA_CHECK(cudaFree(d_B));
     MBENCH_CUDA_CHECK(cudaFree(d_C));
@@ -299,151 +287,69 @@ bool bench_mma_m16n8k16_f16f32() {
     return true;
 }
 
-__global__ void mma_m16n8k8_f16f32_once(half* gA, half* gB, float* gC, float* gD) {
-    __shared__ alignas(128) half sA[16 * 8];
-    __shared__ alignas(128) half sB[8 * 8];
-    __shared__ alignas(128) float sC[16 * 8];
-    __shared__ alignas(128) float sD[16 * 8];
-
-    int tid = threadIdx.x;
-    int warp_id = tid / 32;
-    int warp_tid = tid % 32;
-    int warp_offset_A = 16 * 8 * warp_id;
-
-    // Load data to shared memory
-    for (int i = tid; i < 16 * 8; i += blockDim.x) sA[i] = gA[warp_offset_A + i];
-    for (int i = tid; i < 8 * 8; i += blockDim.x) sB[i] = gB[i];
-    for (int i = tid; i < 16 * 8; i += blockDim.x) sC[i] = gC[i];
-    __syncthreads();
-
-    // Initialize output
-    for (int i = tid; i < 16 * 8; i += blockDim.x) sD[i] = sC[i];
-    __syncthreads();
-
-    // Perform MMA operation
-    mma_m16n8k8_f16f32_kernel(sD, sA, sB, sC);
-    __syncthreads();
-
-    // Copy result to output
-    for (int i = tid; i < 16 * 8; i += blockDim.x) gD[warp_offset_A + i] = sD[i];
-}
-
-__global__ void mma_m16n8k8_f16f32_bench(half* gA, half* gB, float* gC, float* gD, int iterations) {
-    __shared__ alignas(128) half sA[16 * 8];
-    __shared__ alignas(128) half sB[8 * 8];
-    __shared__ alignas(128) float sC[16 * 8];
-    __shared__ alignas(128) float sD[16 * 8];
-
-    int tid = threadIdx.x;
-    int warp_id = tid / 32;
-    int warp_tid = tid % 32;
-    int warp_offset_A = 16 * 8 * warp_id;
-    for (int i = tid; i < 16 * 8; i += blockDim.x) sA[i] = gA[warp_offset_A + i];
-    for (int i = tid; i < 8 * 8; i += blockDim.x) sB[i] = gB[i];
-    for (int i = tid; i < 16 * 8; i += blockDim.x) sC[i] = gC[i];
-    __syncthreads();
-
-    for (int i = tid; i < 16 * 8; i += blockDim.x) sD[i] = sC[i];
-    __syncthreads();
-
-    for (int iter = 0; iter < iterations; ++iter) {
-        // Perform MMA operation
-        mma_m16n8k8_f16f32_kernel(sD, sA, sB, sC);
-        __syncthreads();
-    }
-
-    for (int i = tid; i < 16 * 8; i += blockDim.x) gD[warp_offset_A + i] = sD[i];
-}
-
-bool run_mma_m16n8k8_f16f32_once() {
+bool run_mma_m16n8k8_f16f32(bool bench=false) {
     constexpr int M = 16, N = 8, K = 8;
     constexpr int NUM_THREADS = 32;
     constexpr int NUM_BLOCKS = 1;
-    constexpr int OUTPUT_SIZE = NUM_THREADS;  // 4 floats per thread
+    constexpr int ITERATIONS = 100000;
 
     std::vector<__half> h_A(M * K, __float2half(1.0f));
     std::vector<__half> h_B(K * N, __float2half(1.0f));
-    std::vector<__half> h_C(M * N, __float2half(0.0f));
-    std::vector<float> h_output(OUTPUT_SIZE);
+    std::vector<float> h_C(M * N, 4.0f);
+    std::vector<float> h_output(M * N);
 
     __half *d_A, *d_B;
     float *d_C, *d_output;
     MBENCH_CUDA_CHECK(cudaMalloc(&d_A, M * K * sizeof(half)));
     MBENCH_CUDA_CHECK(cudaMalloc(&d_B, K * N * sizeof(half)));
     MBENCH_CUDA_CHECK(cudaMalloc(&d_C, M * N * sizeof(float)));
-    MBENCH_CUDA_CHECK(cudaMalloc(&d_output, OUTPUT_SIZE * sizeof(float)));
-
-    MBENCH_CUDA_CHECK(cudaMemcpy(d_A, h_A.data(), M * K * sizeof(half), cudaMemcpyHostToDevice));
-    MBENCH_CUDA_CHECK(cudaMemcpy(d_B, h_B.data(), K * N * sizeof(half), cudaMemcpyHostToDevice));
-    MBENCH_CUDA_CHECK(cudaMemcpy(d_C, h_C.data(), M * N * sizeof(float), cudaMemcpyHostToDevice));
-
-    std::cout << "\nRunning mma_m16n8k8_f16f32_once...\n";
-    mma_m16n8k8_f16f32_once<<<NUM_BLOCKS, NUM_THREADS>>>(d_A, d_B, d_C, d_output);
-    MBENCH_CUDA_CHECK(cudaDeviceSynchronize());
-
-    MBENCH_CUDA_CHECK(cudaMemcpy(h_output.data(), d_output, OUTPUT_SIZE * sizeof(float), cudaMemcpyDeviceToHost));
-
-    bool verified = verifyOutput(h_output, 8.0f);
-
-    MBENCH_CUDA_CHECK(cudaFree(d_A));
-    MBENCH_CUDA_CHECK(cudaFree(d_B));
-    MBENCH_CUDA_CHECK(cudaFree(d_C));
-    MBENCH_CUDA_CHECK(cudaFree(d_output));
-
-    return verified;
-}
-
-bool bench_mma_m16n8k8_f16f32() {
-    constexpr int M = 32, N = 8, K = 8;
-    constexpr int NUM_THREADS = 64;
-    constexpr int NUM_BLOCKS = 1;
-    constexpr int ITERATIONS = 10000;
-
-    std::vector<half> h_A(M * K, __float2half(1.0f));
-    std::vector<half> h_B(K * N, __float2half(1.0f));
-    std::vector<float> h_C(M * N, 0.0f);
-    std::vector<float> h_output(M * N);
-
-    half *d_A, *d_B;
-    float *d_C, *d_output;
-    MBENCH_CUDA_CHECK(cudaMalloc(&d_A, M * K * sizeof(half)));
-    MBENCH_CUDA_CHECK(cudaMalloc(&d_B, K * N * sizeof(half)));
-    MBENCH_CUDA_CHECK(cudaMalloc(&d_C, M * N * sizeof(float)));
     MBENCH_CUDA_CHECK(cudaMalloc(&d_output, M * N * sizeof(float)));
 
     MBENCH_CUDA_CHECK(cudaMemcpy(d_A, h_A.data(), M * K * sizeof(half), cudaMemcpyHostToDevice));
     MBENCH_CUDA_CHECK(cudaMemcpy(d_B, h_B.data(), K * N * sizeof(half), cudaMemcpyHostToDevice));
     MBENCH_CUDA_CHECK(cudaMemcpy(d_C, h_C.data(), M * N * sizeof(float), cudaMemcpyHostToDevice));
 
-    mma_m16n8k8_f16f32_bench<<<NUM_BLOCKS, NUM_THREADS>>>(d_A, d_B, d_C, d_output, 10);
-    MBENCH_CUDA_CHECK(cudaDeviceSynchronize());
+    if (bench) {
+        mma_m16n8k8_f16f32<<<NUM_BLOCKS, NUM_THREADS>>>(d_A, d_B, d_C, d_output, 10);
+        MBENCH_CUDA_CHECK(cudaDeviceSynchronize());
+        cudaEvent_t start, stop;
+        MBENCH_CUDA_CHECK(cudaEventCreate(&start));
+        MBENCH_CUDA_CHECK(cudaEventCreate(&stop));
 
-    cudaEvent_t start, stop;
-    MBENCH_CUDA_CHECK(cudaEventCreate(&start));
-    MBENCH_CUDA_CHECK(cudaEventCreate(&stop));
+        MBENCH_CUDA_CHECK(cudaEventRecord(start));
+        mma_m16n8k8_f16f32<<<NUM_BLOCKS, NUM_THREADS>>>(d_A, d_B, d_C, d_output, ITERATIONS);
+        MBENCH_CUDA_CHECK(cudaEventRecord(stop));
+        MBENCH_CUDA_CHECK(cudaEventSynchronize(stop));
 
-    MBENCH_CUDA_CHECK(cudaEventRecord(start));
-    mma_m16n8k8_f16f32_bench<<<NUM_BLOCKS, NUM_THREADS>>>(d_A, d_B, d_C, d_output, ITERATIONS);
-    MBENCH_CUDA_CHECK(cudaEventRecord(stop));
-    MBENCH_CUDA_CHECK(cudaEventSynchronize(stop));
+        float elapsed_ms = 0.0f;
+        MBENCH_CUDA_CHECK(cudaEventElapsedTime(&elapsed_ms, start, stop));
 
-    float elapsed_ms = 0.0f;
-    MBENCH_CUDA_CHECK(cudaEventElapsedTime(&elapsed_ms, start, stop));
+        MBENCH_CUDA_CHECK(cudaMemcpy(h_output.data(), d_output, M * N * sizeof(float), cudaMemcpyDeviceToHost));
 
-    MBENCH_CUDA_CHECK(cudaMemcpy(h_output.data(), d_output, M * N * sizeof(float), cudaMemcpyDeviceToHost));
+        double total_ops = 2.0 * M * N * K * ITERATIONS;
+        double elapsed_sec = elapsed_ms / 1000.0;
+        double throughput_tflops = (total_ops / 1e12) / elapsed_sec;
+        double throughput_gflops = (total_ops / 1e9) / elapsed_sec;
+        std::cout << "\nBenchmark Results (mma_m16n8k8_f16f32_bench):\n";
+        std::cout << "  Iterations: " << ITERATIONS << "\n";
+        std::cout << std::fixed << std::setprecision(6);
+        std::cout << "  Elapsed time: " << elapsed_ms << " ms\n";
+        std::cout << "  Total operations: " << total_ops / 1e9 << " G ops\n";
+        std::cout << "  Throughput: " << throughput_tflops << " TFLOPS";
+        std::cout << " (" << throughput_gflops << " GFLOPS)\n";
+        MBENCH_CUDA_CHECK(cudaEventDestroy(start));
+        MBENCH_CUDA_CHECK(cudaEventDestroy(stop));
+    } else {
+        std::cout << "\nRunning mma_m16n8k8_f16f32_once...\n";
+        mma_m16n8k8_f16f32<<<NUM_BLOCKS, NUM_THREADS>>>(d_A, d_B, d_C, d_output);
+        MBENCH_CUDA_CHECK(cudaDeviceSynchronize());
 
-    double total_ops = 2.0 * M * N * K * ITERATIONS;
-    double elapsed_sec = elapsed_ms / 1000.0;
-    double throughput_tflops = (total_ops / 1e12) / elapsed_sec;
+        MBENCH_CUDA_CHECK(cudaMemcpy(h_output.data(), d_output, M * N * sizeof(float), cudaMemcpyDeviceToHost));
 
-    std::cout << "\nBenchmark Results (mma_m16n8k8_f16f32_bench):\n";
-    std::cout << "  Iterations: " << ITERATIONS << "\n";
-    std::cout << "  Elapsed time: " << elapsed_ms << " ms\n";
-    std::cout << "  Total operations: " << total_ops / 1e9 << " G ops\n";
-    std::cout << "  Throughput: " << throughput_tflops << " TFLOPS\n";
+        bool verified = verifyOutput(h_output, 12.0f);
+        return verified;
+    }
 
-    MBENCH_CUDA_CHECK(cudaEventDestroy(start));
-    MBENCH_CUDA_CHECK(cudaEventDestroy(stop));
     MBENCH_CUDA_CHECK(cudaFree(d_A));
     MBENCH_CUDA_CHECK(cudaFree(d_B));
     MBENCH_CUDA_CHECK(cudaFree(d_C));
@@ -451,31 +357,29 @@ bool bench_mma_m16n8k8_f16f32() {
 
     return true;
 }
-
-
 
 int main() {
     std::cout << "MMA.SYNC Microbenchmark\n";
     std::cout << "=======================\n";
 
     // Test m16n8k16
-    if (!run_mma_m16n8k16_f16f32_once()) {
+    if (!run_mma_m16n8k16_f16f32(false)) {
         std::cerr << "m16n8k16 verification failed!\n";
         return 1;
     }
 
-    if (!bench_mma_m16n8k16_f16f32()) {
+    if (!run_mma_m16n8k16_f16f32(true)) {
         std::cerr << "m16n8k16 benchmark failed!\n";
         return 1;
     }
 
     // Test m16n8k8
-    if (!run_mma_m16n8k8_f16f32_once()) {
+    if (!run_mma_m16n8k8_f16f32(false)) {
         std::cerr << "m16n8k8 verification failed!\n";
         return 1;
     }
 
-    if (!bench_mma_m16n8k8_f16f32()) {
+    if (!run_mma_m16n8k8_f16f32(true)) {
         std::cerr << "m16n8k8 benchmark failed!\n";
         return 1;
     }
@@ -483,4 +387,3 @@ int main() {
     std::cout << "\nAll tests passed!\n";
     return 0;
 }
-
