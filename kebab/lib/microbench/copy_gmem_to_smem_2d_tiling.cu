@@ -299,48 +299,58 @@ __global__ void kernel_copy_2d_cute_tiled(const float* __restrict__ gmem,
 /**
  * Variant 5: CuTe 2D tiled copy with float4 vectorization
  *
- * Uses CuTe's make_tiled_copy with float4 for higher throughput
- * Value layout: 1x32 (32 floats per thread = 8 float4s)
+ * Uses CuTe's make_tiled_copy with float for higher throughput
+ * Thread layout: 32x4 = 128 threads (same as other variants)
+ * Value layout: 1x8 (8 floats per thread)
+ *
+ * Note: Uses float (scalar) copy atom to avoid alignment issues with float4.
+ * CuTe will automatically vectorize when possible.
  */
 __global__ void kernel_copy_2d_cute_tiled_float4(const float* __restrict__ gmem,
                                                  float* __restrict__ output,
                                                  int matrix_size) {
-    __shared__ alignas(128) float4 smem4[TILE_SIZE * TILE_SIZE / 4];
-    const float4* gmem4 = reinterpret_cast<const float4*>(gmem);
-    float4* output4 = reinterpret_cast<float4*>(output);
+    extern __shared__ float smem_cute[];
 
-    // Create 2D tensor for tile
-    auto smem_layout = make_layout(make_shape(Int<TILE_SIZE>{}, Int<TILE_SIZE/4>{}));
-    auto smem_tensor = make_tensor(make_smem_ptr(smem4), smem_layout);
+    // Define global memory layout and tensors
+    auto gmem_layout = make_layout(make_shape(matrix_size, matrix_size));
+    auto gmem_tensor = make_tensor(make_gmem_ptr(gmem), gmem_layout);
+    auto out_tensor = make_tensor(make_gmem_ptr(output), gmem_layout);
 
-    // Load tile
-    auto gmem_layout = make_layout(make_shape(matrix_size, matrix_size/4));
-    auto gmem_tensor = make_tensor(make_gmem_ptr(gmem4), gmem_layout);
-    auto out_tensor = make_tensor(make_gmem_ptr(output4), gmem_layout);
+    // Define shared memory layout and tensor
+    auto smem_layout = make_layout(make_shape(Int<TILE_SIZE>{}, Int<TILE_SIZE>{}));
+    auto smem_tensor = make_tensor(make_smem_ptr(smem_cute), smem_layout);
 
-    Tensor tiled_gmem_tensors = tiled_divide(gmem_tensor, make_shape(Int<TILE_SIZE>{}, Int<TILE_SIZE/4>{})); // ((TILE_SIZE, TILE_SIZE), m, n)
-    Tensor tiled_out_tensors = tiled_divide(out_tensor, make_shape(Int<TILE_SIZE>{}, Int<TILE_SIZE/4>{})); // ((TILE_SIZE, TILE_SIZE), m, n)
-    Tensor tiled_gmem_tensor = tiled_gmem_tensors(make_coord(_, _), blockIdx.x, blockIdx.y); // (TILE_SIZE, TILE_SIZE)
-    Tensor tiled_out_tensor = tiled_out_tensors(make_coord(_, _), blockIdx.x, blockIdx.y); // (TILE_SIZE, TILE_SIZE)
+    // Block level tiling on gmem
+    Tensor tiled_gmem_tensors = tiled_divide(gmem_tensor, make_shape(Int<TILE_SIZE>{}, Int<TILE_SIZE>{}));
+    Tensor tiled_out_tensors = tiled_divide(out_tensor, make_shape(Int<TILE_SIZE>{}, Int<TILE_SIZE>{}));
+    Tensor tiled_gmem_tensor = tiled_gmem_tensors(make_coord(_, _), blockIdx.x, blockIdx.y);
+    Tensor tiled_out_tensor = tiled_out_tensors(make_coord(_, _), blockIdx.x, blockIdx.y);
 
-    // Create tiled copy with float4
-    using CopyAtom = Copy_Atom<UniversalCopy<float4>, float4>;
+    // Create tiled copy with float (scalar)
+    // Thread layout: 32x4 = 128 threads (m-major: stride<1,32>)
+    // Value layout: 1x8 = 8 floats per thread
+    // Total per tile: 32*1 x 4*8 = 32 x 32 = 1024 floats = TILE_SIZE*TILE_SIZE
+    using CopyAtom = Copy_Atom<UniversalCopy<float>, float>;
     auto tiled_copy = make_tiled_copy(
         CopyAtom{},
-        Layout<Shape<Int<8>, Int<16>>>{},  // Thread layout
-        Layout<Shape<Int<1>, Int<2>>>{}                             // Value layout: 32 floats
+        Layout<Shape<Int<32>, Int<4>>, Stride<Int<1>, Int<32>>>{},  // Thread layout: 32x4 m-major
+        Layout<Shape<Int<1>, Int<8>>>{}                              // Value layout: 1x8 (8 floats)
     );
 
     auto thr_copy = tiled_copy.get_slice(threadIdx.x);
-    auto thr_gmem = thr_copy.partition_S(gmem_tensor);
+
+    // Partition tensors for this thread
+    auto thr_gmem = thr_copy.partition_S(tiled_gmem_tensor);
     auto thr_smem = thr_copy.partition_D(smem_tensor);
 
+    // Copy GMEM → SMEM
     copy(tiled_copy, thr_gmem, thr_smem);
     __syncthreads();
 
-    // Store tile
+    // Partition output tensor for this thread
     auto thr_out = thr_copy.partition_D(tiled_out_tensor);
 
+    // Copy SMEM → GMEM
     copy(tiled_copy, thr_smem, thr_out);
     __syncthreads();
 }
@@ -419,93 +429,93 @@ void runBenchmark2D(int matrix_size, MicrobenchRunner& runner,
     std::cout << "  GMEM traffic: " << formatBytes(total_bytes) << " (read + write)" << std::endl;
 
     // Variant 1: Native 2D
-    // {
-    //     MBENCH_CUDA_CHECK(cudaMemset(d_output, 0, n_bytes));
-    //     auto kernel = [=] {
-    //         kernel_copy_2d_native<<<grid, block, SMEM_SIZE_2D>>>(d_input, d_output, matrix_size);
-    //     };
-    //     float latency_us = runner.measureLatencyUs(kernel);
-    //     float bw = MicrobenchRunner::calculateBandwidthGBps(total_bytes, latency_us);
+    {
+        MBENCH_CUDA_CHECK(cudaMemset(d_output, 0, n_bytes));
+        auto kernel = [=] {
+            kernel_copy_2d_native<<<grid, block, SMEM_SIZE_2D>>>(d_input, d_output, matrix_size);
+        };
+        float latency_us = runner.measureLatencyUs(kernel);
+        float bw = MicrobenchRunner::calculateBandwidthGBps(total_bytes, latency_us);
 
-    //     MBENCH_CUDA_CHECK(cudaMemcpy(h_output.data(), d_output, n_bytes, cudaMemcpyDeviceToHost));
-    //     bool correct = verifyOutput2D(h_input.data(), h_output.data(), matrix_size, "Native 2D");
+        MBENCH_CUDA_CHECK(cudaMemcpy(h_output.data(), d_output, n_bytes, cudaMemcpyDeviceToHost));
+        bool correct = verifyOutput2D(h_input.data(), h_output.data(), matrix_size, "Native 2D");
 
-    //     MicrobenchResult result;
-    //     result.variant_name = "Native 2D (scalar)";
-    //     result.description = correct ? "2D tiling, 32x32 tiles, scalar loads" : "VERIFICATION FAILED";
-    //     result.data_size_bytes = n_bytes;
-    //     result.latency_us = latency_us;
-    //     result.bandwidth_gbps = bw;
-    //     result.efficiency_pct = (bw / peak_bw) * 100.0f;
-    //     result.is_baseline = true;
-    //     report.addResult(result);
-    // }
+        MicrobenchResult result;
+        result.variant_name = "Native 2D (scalar)";
+        result.description = correct ? "2D tiling, 32x32 tiles, scalar loads" : "VERIFICATION FAILED";
+        result.data_size_bytes = n_bytes;
+        result.latency_us = latency_us;
+        result.bandwidth_gbps = bw;
+        result.efficiency_pct = (bw / peak_bw) * 100.0f;
+        result.is_baseline = true;
+        report.addResult(result);
+    }
 
-    // // Variant 2: Vectorized 2D (float4, 128-bit loads)
-    // {
-    //     MBENCH_CUDA_CHECK(cudaMemset(d_output, 0, n_bytes));
-    //     auto kernel = [=] {
-    //         kernel_copy_2d_vectorized<<<grid, block, SMEM_SIZE_2D>>>(d_input, d_output, matrix_size);
-    //     };
-    //     float latency_us = runner.measureLatencyUs(kernel);
-    //     float bw = MicrobenchRunner::calculateBandwidthGBps(total_bytes, latency_us);
+    // Variant 2: Vectorized 2D (float4, 128-bit loads)
+    {
+        MBENCH_CUDA_CHECK(cudaMemset(d_output, 0, n_bytes));
+        auto kernel = [=] {
+            kernel_copy_2d_vectorized<<<grid, block, SMEM_SIZE_2D>>>(d_input, d_output, matrix_size);
+        };
+        float latency_us = runner.measureLatencyUs(kernel);
+        float bw = MicrobenchRunner::calculateBandwidthGBps(total_bytes, latency_us);
 
-    //     MBENCH_CUDA_CHECK(cudaMemcpy(h_output.data(), d_output, n_bytes, cudaMemcpyDeviceToHost));
-    //     bool correct = verifyOutput2D(h_input.data(), h_output.data(), matrix_size, "Vectorized 2D");
+        MBENCH_CUDA_CHECK(cudaMemcpy(h_output.data(), d_output, n_bytes, cudaMemcpyDeviceToHost));
+        bool correct = verifyOutput2D(h_input.data(), h_output.data(), matrix_size, "Vectorized 2D");
 
-    //     MicrobenchResult result;
-    //     result.variant_name = "Vectorized 2D (float4)";
-    //     result.description = correct ? "2D tiling, 32x32 tiles, float4 loads" : "VERIFICATION FAILED";
-    //     result.data_size_bytes = n_bytes;
-    //     result.latency_us = latency_us;
-    //     result.bandwidth_gbps = bw;
-    //     result.efficiency_pct = (bw / peak_bw) * 100.0f;
-    //     report.addResult(result);
-    // }
+        MicrobenchResult result;
+        result.variant_name = "Vectorized 2D (float4)";
+        result.description = correct ? "2D tiling, 32x32 tiles, float4 loads" : "VERIFICATION FAILED";
+        result.data_size_bytes = n_bytes;
+        result.latency_us = latency_us;
+        result.bandwidth_gbps = bw;
+        result.efficiency_pct = (bw / peak_bw) * 100.0f;
+        report.addResult(result);
+    }
 
-    // // Variant 3: PTX 2D (ld.global.cg with cache hints)
-    // {
-    //     MBENCH_CUDA_CHECK(cudaMemset(d_output, 0, n_bytes));
-    //     auto kernel = [=] {
-    //         kernel_copy_2d_ptx<<<grid, block, SMEM_SIZE_2D>>>(d_input, d_output, matrix_size);
-    //     };
-    //     float latency_us = runner.measureLatencyUs(kernel);
-    //     float bw = MicrobenchRunner::calculateBandwidthGBps(total_bytes, latency_us);
+    // Variant 3: PTX 2D (ld.global.cg with cache hints)
+    {
+        MBENCH_CUDA_CHECK(cudaMemset(d_output, 0, n_bytes));
+        auto kernel = [=] {
+            kernel_copy_2d_ptx<<<grid, block, SMEM_SIZE_2D>>>(d_input, d_output, matrix_size);
+        };
+        float latency_us = runner.measureLatencyUs(kernel);
+        float bw = MicrobenchRunner::calculateBandwidthGBps(total_bytes, latency_us);
 
-    //     MBENCH_CUDA_CHECK(cudaMemcpy(h_output.data(), d_output, n_bytes, cudaMemcpyDeviceToHost));
-    //     bool correct = verifyOutput2D(h_input.data(), h_output.data(), matrix_size, "PTX 2D");
+        MBENCH_CUDA_CHECK(cudaMemcpy(h_output.data(), d_output, n_bytes, cudaMemcpyDeviceToHost));
+        bool correct = verifyOutput2D(h_input.data(), h_output.data(), matrix_size, "PTX 2D");
 
-    //     MicrobenchResult result;
-    //     result.variant_name = "PTX 2D (ld.cg)";
-    //     result.description = correct ? "2D tiling, 32x32 tiles, PTX ld.global.cg" : "VERIFICATION FAILED";
-    //     result.data_size_bytes = n_bytes;
-    //     result.latency_us = latency_us;
-    //     result.bandwidth_gbps = bw;
-    //     result.efficiency_pct = (bw / peak_bw) * 100.0f;
-    //     report.addResult(result);
-    // }
+        MicrobenchResult result;
+        result.variant_name = "PTX 2D (ld.cg)";
+        result.description = correct ? "2D tiling, 32x32 tiles, PTX ld.global.cg" : "VERIFICATION FAILED";
+        result.data_size_bytes = n_bytes;
+        result.latency_us = latency_us;
+        result.bandwidth_gbps = bw;
+        result.efficiency_pct = (bw / peak_bw) * 100.0f;
+        report.addResult(result);
+    }
 
-    // // Variant 4: CuTe 2D tiled copy with UniversalCopy
-    // {
-    //     MBENCH_CUDA_CHECK(cudaMemset(d_output, 0, n_bytes));
-    //     auto kernel = [=] {
-    //         kernel_copy_2d_cute_tiled<<<grid, block, SMEM_SIZE_2D>>>(d_input, d_output, matrix_size);
-    //     };
-    //     float latency_us = runner.measureLatencyUs(kernel);
-    //     float bw = MicrobenchRunner::calculateBandwidthGBps(total_bytes, latency_us);
+    // Variant 4: CuTe 2D tiled copy with UniversalCopy
+    {
+        MBENCH_CUDA_CHECK(cudaMemset(d_output, 0, n_bytes));
+        auto kernel = [=] {
+            kernel_copy_2d_cute_tiled<<<grid, block, SMEM_SIZE_2D>>>(d_input, d_output, matrix_size);
+        };
+        float latency_us = runner.measureLatencyUs(kernel);
+        float bw = MicrobenchRunner::calculateBandwidthGBps(total_bytes, latency_us);
 
-    //     MBENCH_CUDA_CHECK(cudaMemcpy(h_output.data(), d_output, n_bytes, cudaMemcpyDeviceToHost));
-    //     bool correct = verifyOutput2D(h_input.data(), h_output.data(), matrix_size, "CuTe 2D");
+        MBENCH_CUDA_CHECK(cudaMemcpy(h_output.data(), d_output, n_bytes, cudaMemcpyDeviceToHost));
+        bool correct = verifyOutput2D(h_input.data(), h_output.data(), matrix_size, "CuTe 2D");
 
-    //     MicrobenchResult result;
-    //     result.variant_name = "CuTe 2D tiled";
-    //     result.description = correct ? "make_tiled_copy, UniversalCopy, 2D layout" : "VERIFICATION FAILED";
-    //     result.data_size_bytes = n_bytes;
-    //     result.latency_us = latency_us;
-    //     result.bandwidth_gbps = bw;
-    //     result.efficiency_pct = (bw / peak_bw) * 100.0f;
-    //     report.addResult(result);
-    // }
+        MicrobenchResult result;
+        result.variant_name = "CuTe 2D tiled";
+        result.description = correct ? "make_tiled_copy, UniversalCopy, 2D layout" : "VERIFICATION FAILED";
+        result.data_size_bytes = n_bytes;
+        result.latency_us = latency_us;
+        result.bandwidth_gbps = bw;
+        result.efficiency_pct = (bw / peak_bw) * 100.0f;
+        report.addResult(result);
+    }
 
     // Variant 5: CuTe 2D tiled copy with float4 vectorization
     {
@@ -551,7 +561,7 @@ int main() {
     std::cout << "Warmup: 20 iterations | Measurement: 200 iterations\n\n";
 
     // Test different matrix sizes
-    std::vector<int> matrix_sizes = {32, 64, 128, 256, 512, 1024, 2048, 4096, 8192};
+    std::vector<int> matrix_sizes = {32, 64, 128, 256, 512, 1024, 2048, 4096};
     // std::vector<int> matrix_sizes = {32};
 
     for (int size : matrix_sizes) {
