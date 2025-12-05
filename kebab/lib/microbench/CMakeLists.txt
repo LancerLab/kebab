@@ -7,13 +7,21 @@ add_library(microbench_common
 target_include_directories(microbench_common PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(microbench_common CUDA::cudart)
 
-# Copy GMEM to SMEM microbenchmark
+# Copy GMEM to SMEM microbenchmark (1D linear copy)
 add_executable(mbench_copy_gmem_to_smem
     copy_gmem_to_smem.cu
 )
 target_include_directories(mbench_copy_gmem_to_smem PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(mbench_copy_gmem_to_smem microbench_common CUDA::cudart)
 set_target_properties(mbench_copy_gmem_to_smem PROPERTIES CUDA_ARCHITECTURES OFF)
+
+# Copy GMEM to SMEM with 2D tiling microbenchmark
+add_executable(mbench_copy_gmem_to_smem_2d_tiling
+    copy_gmem_to_smem_2d_tiling.cu
+)
+target_include_directories(mbench_copy_gmem_to_smem_2d_tiling PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(mbench_copy_gmem_to_smem_2d_tiling microbench_common CUDA::cudart)
+set_target_properties(mbench_copy_gmem_to_smem_2d_tiling PROPERTIES CUDA_ARCHITECTURES OFF)
 
 # WGMMA MMA microbenchmark
 add_executable(mbench_mma_wgmma
