@@ -23,6 +23,42 @@ target_include_directories(mbench_copy_gmem_to_smem_2d_tiling PRIVATE ${CMAKE_SO
 target_link_libraries(mbench_copy_gmem_to_smem_2d_tiling microbench_common CUDA::cudart)
 set_target_properties(mbench_copy_gmem_to_smem_2d_tiling PROPERTIES CUDA_ARCHITECTURES OFF)
 
+# Copy GMEM to SMEM with 2D tiling using cp.async microbenchmark (requires SM_80+)
+add_executable(mbench_copy_gmem_to_smem_2d_cp_async
+    copy_gmem_to_smem_2d_cp_async.cu
+)
+target_include_directories(mbench_copy_gmem_to_smem_2d_cp_async PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(mbench_copy_gmem_to_smem_2d_cp_async microbench_common CUDA::cudart)
+set_target_properties(mbench_copy_gmem_to_smem_2d_cp_async PROPERTIES CUDA_ARCHITECTURES 90)
+target_compile_options(mbench_copy_gmem_to_smem_2d_cp_async PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-arch=sm_90>)
+
+# Copy GMEM to SMEM with 2D tiling using TMA with CuTe API microbenchmark
+add_executable(mbench_copy_gmem_to_smem_2d_tma_cute
+    copy_gmem_to_smem_2d_tma_cute.cu
+)
+target_include_directories(mbench_copy_gmem_to_smem_2d_tma_cute PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(mbench_copy_gmem_to_smem_2d_tma_cute microbench_common CUDA::cudart CUDA::cuda_driver)
+set_target_properties(mbench_copy_gmem_to_smem_2d_tma_cute PROPERTIES CUDA_ARCHITECTURES 90)
+target_compile_options(mbench_copy_gmem_to_smem_2d_tma_cute PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-arch=sm_90>)
+
+# Copy GMEM to SMEM with 2D tiling using TMA with CDE API microbenchmark
+add_executable(mbench_copy_gmem_to_smem_2d_tma_cde
+    copy_gmem_to_smem_2d_tma_cde.cu
+)
+target_include_directories(mbench_copy_gmem_to_smem_2d_tma_cde PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(mbench_copy_gmem_to_smem_2d_tma_cde microbench_common CUDA::cudart CUDA::cuda_driver)
+set_target_properties(mbench_copy_gmem_to_smem_2d_tma_cde PROPERTIES CUDA_ARCHITECTURES 90)
+target_compile_options(mbench_copy_gmem_to_smem_2d_tma_cde PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-arch=sm_90>)
+
+# Copy GMEM to SMEM with 2D tiling using TMA with PTX microbenchmark
+add_executable(mbench_copy_gmem_to_smem_2d_tma_ptx
+    copy_gmem_to_smem_2d_tma_ptx.cu
+)
+target_include_directories(mbench_copy_gmem_to_smem_2d_tma_ptx PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(mbench_copy_gmem_to_smem_2d_tma_ptx microbench_common CUDA::cudart CUDA::cuda_driver)
+set_target_properties(mbench_copy_gmem_to_smem_2d_tma_ptx PROPERTIES CUDA_ARCHITECTURES 90)
+target_compile_options(mbench_copy_gmem_to_smem_2d_tma_ptx PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-arch=sm_90>)
+
 # WGMMA MMA microbenchmark
 add_executable(mbench_mma_wgmma
     mma_wgmma.cu
