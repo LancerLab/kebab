@@ -158,6 +158,7 @@ __global__ void __launch_bounds__(V2_NUM_THREADS)
 gemm_v2_wgmma_tma_kernel(int M, int N, int K, __half* C,
                           const CUtensorMap* tensorMapA,
                           const CUtensorMap* tensorMapB) {
+    // Shared memory for A and B tiles
     __shared__ alignas(128) __half sA[V2_BM * V2_BK];
     __shared__ alignas(128) __half sB[V2_BK * V2_BN];
 
@@ -172,6 +173,8 @@ gemm_v2_wgmma_tma_kernel(int M, int N, int K, __half* C,
 
     // Initialize barriers
     #pragma nv_diag_suppress static_var_with_dynamic_init
+
+    // TMA barriers
     __shared__ barrier barA;
     __shared__ barrier barB;
 
@@ -181,10 +184,15 @@ gemm_v2_wgmma_tma_kernel(int M, int N, int K, __half* C,
         cde::fence_proxy_async_shared_cta();
     }
     __syncthreads();
+    // TMA barriers end
 
     barrier::arrival_token tokenA, tokenB;
 
     // Main K-loop
+    // iterate over K dim, each time, one warpgroup load a tile of A and B from global to shared mem
+    // A is 64x64 tile, B is 64x64 tile
+    // then perform 4 unrolled WGMMA operation, each time, one warpgroup compute a 64x64 tile of C
+    // NOTE: here we send different offset to wgmma, is equivalent to cute way without calculate offset
     for (int block_k_iter = 0; block_k_iter < num_blocks_k; ++block_k_iter) {
         // TMA Load A and B tiles
         if (threadIdx.x == 0) {
@@ -214,6 +222,14 @@ gemm_v2_wgmma_tma_kernel(int M, int N, int K, __half* C,
     }
 
     // Store results to global memory (column-major C)
+    // lane: 0-31, warp: 0-3
+    // each warp handles 16 rows, thus row_base = warp * 16
+    // every 4 lane (0-3) handles same row, row_base + lane / 4
+    // each 4 lane team, handles 2 rows, (row, ...) and (row+8, ...)
+    // this is easy to calcute: 32threads together handle 16rows, 4 threads per row, need 2 iterations
+    // colwise:
+    // group per 16 col, iterates 4 times, w = 0-3, col_base = w * 16, each time 4 lane handles 2 col
+    // tid 0-3 handles 1 row 16 col, each handle (row, col), (row, col+1), (row, col+8), (row, col+9)
     {
         int tid = threadIdx.x;
         int lane = tid % 32;

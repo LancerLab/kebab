@@ -65,15 +65,15 @@ void gemm(const __half* A, const __half* B, __half* C,
             break;
         case 6:
             // V6: Persistent kernel + tile scheduling (SM90 Hopper, RC mode only)
-            gemm_v6_ptxbarrier_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            gemm_v6_persistent_tiling_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
             break;
         case 7:
             // V7: PTX barriers + 5D TMA (SM90 Hopper, RC mode only)
-            gemm_v7_cluster_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            gemm_v7_ptxbarrier_5dtma_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
             break;
         case 8:
             // V8: Thread Block Clusters + TMA Multicast (SM90 Hopper, RC mode only)
-            gemm_v8_multicast_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            gemm_v8_cluster_multicast_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
             break;
         case 9:
             // V9: Streaming Stores + Clusters + TMA Multicast (SM90 Hopper, RC mode only)

@@ -63,7 +63,8 @@ operators:
     # cute version 2: WGMMA with TMA
     # cute version 3: Optimized multi-stage pipeline with TMA
     # When multiple versions are specified, they are displayed as columns in a comparison table
-    versions: [1, 2, 12]
+    versions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    # versions: [2]
     # Initialization method for matrices A and B
     # Format: <A_init>-<B_init>
     # Options: one, rand, range, row, col

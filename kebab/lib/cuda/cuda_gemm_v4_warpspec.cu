@@ -40,6 +40,9 @@ __device__ static inline uint64_t matrix_descriptor_encode_v4(uint64_t x) {
     return (((x) & 0x3FFFF) >> 0x4);
 }
 
+// atuo smem_layout = ....
+// copy_atom = .Swizzle(3, 4, 3)();
+// 64 bit, 63-62, swizzle, 61-33, leading dim.. 
 __device__ uint64_t make_smem_desc_v4(__half* ptr) {
     uint32_t addr = static_cast<uint32_t>(__cvta_generic_to_shared(ptr));
     uint64_t desc = 0x0000000000000000;

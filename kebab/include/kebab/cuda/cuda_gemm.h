@@ -83,25 +83,25 @@ void gemm_v5_persistent_fp16(const __half* A, const __half* B, __half* C,
  * @brief V6: Persistent kernel + tile scheduling (RC mode, SM90 Hopper required)
  * 128×256×64 tiles, grid-constant TMA, 16×8 tile schedule pattern
  */
-void gemm_v6_ptxbarrier_fp16(const __half* A, const __half* B, __half* C,
-                              int M, int N, int K, char lhs_format, char rhs_format,
-                              cudaStream_t stream);
+void gemm_v6_persistent_tiling_fp16(const __half* A, const __half* B, __half* C,
+                                     int M, int N, int K, char lhs_format, char rhs_format,
+                                     cudaStream_t stream);
 
 /**
  * @brief V7: PTX barriers + 5D TMA (RC mode, SM90 Hopper required)
  * 128×256×64 tiles, mbarrier instructions, cluster-based async copy
  */
-void gemm_v7_cluster_fp16(const __half* A, const __half* B, __half* C,
-                          int M, int N, int K, char lhs_format, char rhs_format,
-                          cudaStream_t stream);
+void gemm_v7_ptxbarrier_5dtma_fp16(const __half* A, const __half* B, __half* C,
+                                    int M, int N, int K, char lhs_format, char rhs_format,
+                                    cudaStream_t stream);
 
 /**
  * @brief V8: Thread Block Clusters + TMA Multicast (RC mode, SM90 Hopper required)
  * 128×256×64 tiles, CLUSTER_M=2, CLUSTER_N=1, multicast for shared memory broadcast
  */
-void gemm_v8_multicast_fp16(const __half* A, const __half* B, __half* C,
-                            int M, int N, int K, char lhs_format, char rhs_format,
-                            cudaStream_t stream);
+void gemm_v8_cluster_multicast_fp16(const __half* A, const __half* B, __half* C,
+                                     int M, int N, int K, char lhs_format, char rhs_format,
+                                     cudaStream_t stream);
 
 /**
  * @brief V9: Streaming Stores + Clusters + TMA Multicast (RC mode, SM90 Hopper required)

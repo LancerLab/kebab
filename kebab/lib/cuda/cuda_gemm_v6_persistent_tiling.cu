@@ -1,11 +1,11 @@
 /**
- * @file cuda_gemm_v7_cluster.cu
- * @brief CUDA V7 GEMM with PTX barriers + 5D TMA (based on fast.cu kernel 7)
+ * @file cuda_gemm_v6_ptxbarrier.cu
+ * @brief CUDA V6 GEMM with persistent kernel + tile scheduling (based on fast.cu kernel 6)
  *
  * Key features:
- * - PTX mbarrier instructions (more efficient than cuda::barrier)
- * - 5D TMA tensor maps with cluster-based async copy
- * - PTX-level expect_tx/wait synchronization
+ * - Persistent kernel: each SM processes multiple tiles
+ * - Grid-constant TMA maps for better performance
+ * - Tile scheduling: 16×8 tile pattern
  * - 128×256×64 tiles, 3 warp-groups
  *
  * Note: Requires SM90 (Hopper) architecture
@@ -13,6 +13,8 @@
 
 #include "kebab/cuda/cuda_gemm.h"
 #include <cuda_fp16.h>
+#include <cuda/barrier>
+#include <cuda/std/utility>
 #include <cstdio>
 #include <cassert>
 #include <cuda.h>
@@ -20,53 +22,56 @@
 
 namespace baseline {
 
+namespace cde = cuda::device::experimental;
+using barrier = cuda::barrier<cuda::thread_scope_block>;
+
 // ============================================================================
-// WGMMA Helper Functions (V7)
+// WGMMA Helper Functions (V6)
 // ============================================================================
 
-__device__ static inline uint64_t matrix_descriptor_encode_v7(uint64_t x) {
+__device__ static inline uint64_t matrix_descriptor_encode_v6(uint64_t x) {
     return (((x) & 0x3FFFF) >> 0x4);
 }
 
-__device__ uint64_t make_smem_desc_v7(__half* ptr) {
+__device__ uint64_t make_smem_desc_v6(__half* ptr) {
     uint32_t addr = static_cast<uint32_t>(__cvta_generic_to_shared(ptr));
     uint64_t desc = 0x0000000000000000;
-    desc |= matrix_descriptor_encode_v7(addr);
-    desc |= matrix_descriptor_encode_v7((uint64_t)16) << 16;
-    desc |= matrix_descriptor_encode_v7((uint64_t)1024) << 32;
+    desc |= matrix_descriptor_encode_v6(addr);
+    desc |= matrix_descriptor_encode_v6((uint64_t)16) << 16;
+    desc |= matrix_descriptor_encode_v6((uint64_t)1024) << 32;
     desc |= 1llu << 62;
     return desc;
 }
 
-__device__ void warpgroup_arrive_v7() {
+__device__ void warpgroup_arrive_v6() {
     asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory");
 }
 
-__device__ void warpgroup_commit_batch_v7() {
+__device__ void warpgroup_commit_batch_v6() {
     asm volatile("wgmma.commit_group.sync.aligned;\n" ::: "memory");
 }
 
 template <int N>
-__device__ void warpgroup_wait_v7() {
+__device__ void warpgroup_wait_v6() {
     static_assert(N >= 0 && N <= 7, "WGMMA wait: N must be in range [0, 7]");
     asm volatile("wgmma.wait_group.sync.aligned %0;\n" ::"n"(N) : "memory");
 }
 
 template <uint32_t RegCount>
-__device__ void warpgroup_reg_alloc_v7() {
+__device__ void warpgroup_reg_alloc_v6() {
     asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;\n" : : "n"(RegCount));
 }
 
 template <uint32_t RegCount>
-__device__ void warpgroup_reg_dealloc_v7() {
+__device__ void warpgroup_reg_dealloc_v6() {
     asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;\n" : : "n"(RegCount));
 }
 
 // WGMMA 64×256×16 for FP16
 template<int ScaleD, int ScaleA, int ScaleB, int TransA, int TransB>
-__device__ void wgmma256_v7(float d[16][8], __half* sA, __half* sB) {
-    uint64_t desc_a = make_smem_desc_v7(&sA[0]);
-    uint64_t desc_b = make_smem_desc_v7(&sB[0]);
+__device__ void wgmma256_v6(float d[16][8], __half* sA, __half* sB) {
+    uint64_t desc_a = make_smem_desc_v6(&sA[0]);
+    uint64_t desc_b = make_smem_desc_v6(&sB[0]);
     asm volatile(
         "{\n"
         "wgmma.mma_async.sync.aligned.m64n256k16.f32.f16.f16 "
@@ -128,115 +133,67 @@ __device__ void wgmma256_v7(float d[16][8], __half* sA, __half* sB) {
 }
 
 // ============================================================================
-// PTX Barrier Functions
-// ============================================================================
-
-__device__ static __forceinline__ void init_barrier_v7(uint64_t* bar, int thread_count, int transaction_count) {
-    uint32_t bar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
-    asm volatile(
-        "mbarrier.init.shared::cta.b64 [%0], %1;\n"
-        :: "r"(bar_ptr), "r"(thread_count + transaction_count)
-    );
-}
-
-__device__ static __forceinline__ void expect_bytes_v7(uint64_t* bar, uint32_t bytes) {
-    uint32_t bar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
-    asm volatile(
-        "mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 _, [%0], %1;\n"
-        :: "r"(bar_ptr), "r"(bytes));
-}
-
-__device__ static inline void load_async_v7(__half *dst, void const* const src_tma_map, uint64_t* bar,
-                                            int global_col_idx, int global_row_idx) {
-    uint64_t tma_ptr = reinterpret_cast<uint64_t>(src_tma_map);
-    uint32_t mbar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
-    uint32_t dst_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(dst));
-
-    asm volatile(
-        "cp.async.bulk.tensor.5d.shared::cluster.global.tile.mbarrier::complete_tx::bytes"
-        " [%0], [%1, {%3, %4, %5, 0, 0}], [%2];"
-        :
-        : "r"(dst_ptr), "l"(tma_ptr), "r"(mbar_ptr),
-          "n"(0), "r"(global_row_idx), "r"(global_col_idx / 64)
-        : "memory"
-    );
-}
-
-__device__ static __forceinline__ void wait_v7(uint64_t* bar, int kPhaseBit) {
-    uint32_t mbar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
-    asm volatile(
-        "{\n"
-        ".reg .pred P1;\n"
-        "LAB_WAIT:\n"
-        "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 P1, [%0], %1;\n"
-        "@P1 bra.uni DONE;\n"
-        "bra.uni LAB_WAIT;\n"
-        "DONE:\n"
-        "}\n"
-        :: "r"(mbar_ptr), "r"(kPhaseBit)
-    );
-}
-
-__device__ static __forceinline__ void arrive_v7(uint64_t* bar, uint32_t count = 1) {
-    uint32_t mbar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
-    asm volatile(
-        "mbarrier.arrive.release.cta.shared::cta.b64 _, [%0], %1;\n"
-        :
-        : "r"(mbar_ptr), "r"(count)
-        : "memory"
-    );
-}
-
-// ============================================================================
-// TMA Functions (5D tensor maps)
+// TMA Functions
 // ============================================================================
 
 template <int BlockMajorSize, int BlockMinorSize>
-CUtensorMap create_tensor_map_5d_v7(__half* gmem_ptr, int global_height, int global_width) {
-    CUtensorMap tma_map;
+void create_tensor_map_v6(CUtensorMap *tma_map, __half* gmem_ptr,
+                          int blocks_height, int blocks_width) {
     void* gmem_address = (void*)gmem_ptr;
-    static_assert(BlockMinorSize >= 64);
-
-    uint64_t gmem_prob_shape[5] = {64, (uint64_t)global_height, (uint64_t)global_width / 64, 1, 1};
-    uint64_t gmem_prob_stride[5] = {sizeof(__half) * global_width, 64 * sizeof(__half), 0, 0, 0};
-    uint32_t smem_box_shape[5] = {64, uint32_t(BlockMajorSize), uint32_t(BlockMinorSize / 64), 1, 1};
+    uint64_t gmem_prob_shape[5] = {
+        (uint64_t)BlockMinorSize * blocks_width,
+        (uint64_t)BlockMajorSize * blocks_height, 1, 1, 1
+    };
+    uint64_t gmem_prob_stride[5] = {
+        sizeof(__half), sizeof(__half) * BlockMinorSize * blocks_width, 0, 0, 0
+    };
+    uint32_t smem_box_shape[5] = {
+        uint32_t(BlockMinorSize), uint32_t(BlockMajorSize), 1, 1, 1
+    };
     uint32_t smem_box_stride[5] = {1, 1, 1, 1, 1};
 
     cuTensorMapEncodeTiled(
-        &tma_map, CU_TENSOR_MAP_DATA_TYPE_FLOAT16, 5, gmem_address, gmem_prob_shape,
-        gmem_prob_stride, smem_box_shape, smem_box_stride,
+        tma_map, CU_TENSOR_MAP_DATA_TYPE_FLOAT16, 2, gmem_address, gmem_prob_shape,
+        gmem_prob_stride + 1, smem_box_shape, smem_box_stride,
         CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
         CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+}
 
-    return tma_map;
+template<int BlockMajorSize, int BlockMinorSize>
+static inline CUtensorMap allocate_tensor_map_v6(__half* src, int blocks_height, int blocks_width) {
+    CUtensorMap tma_map_host;
+    create_tensor_map_v6<BlockMajorSize, BlockMinorSize>(&tma_map_host, src, blocks_height, blocks_width);
+    return tma_map_host;
 }
 
 // ============================================================================
-// V7 Kernel Configuration
+// V6 Kernel Configuration
 // ============================================================================
 
-constexpr int V7_BM = 128;
-constexpr int V7_BN = 256;
-constexpr int V7_BK = 64;
-constexpr int V7_NUM_THREADS = 384;
-constexpr int V7_QSIZE = 3;
-constexpr int V7_NUM_SM = 128;
+constexpr int V6_BM = 128;
+constexpr int V6_BN = 256;
+constexpr int V6_BK = 64;
+constexpr int V6_NUM_THREADS = 384;
+constexpr int V6_QSIZE = 3;
+constexpr int V6_NUM_SM = 128;
 
 template <int BM, int BN, int BK, int QSIZE>
-struct SMemV7 {
+struct SMemV6 {
     alignas(128) __half A[BM * BK * QSIZE];
     alignas(128) __half B[BK * BN * QSIZE];
 };
 
-#define CEIL_DIV_V7(a, b) (((a) + (b) - 1) / (b))
+// ============================================================================
+// Tile Scheduler for Persistent Kernel
+// ============================================================================
 
-// Simple linear schedule for V7
+// Simple linear schedule (more robust for all sizes)
 template<int NUM_SM, int BM, int BN>
-struct ScheduleV7 {
+struct ScheduleV6 {
     int st, en;
     int total_blocks_n;
 
-    __device__ __forceinline__ ScheduleV7(int M, int N, int block) {
+    __device__ __forceinline__ ScheduleV6(int M, int N, int block) {
         int total_blocks = (M / BM) * (N / BN);
         total_blocks_n = N / BN;
         int blocks_per_sm = total_blocks / NUM_SM;
@@ -250,35 +207,32 @@ struct ScheduleV7 {
         }
     }
 
-    __device__ __forceinline__ bool next(int &block_m, int &block_n) {
-        if (en == st) return false;
-        int num_block = st++;
-        block_m = num_block / total_blocks_n;
-        block_n = num_block % total_blocks_n;
-        return true;
+    __device__ __forceinline__ int next() {
+        if (en == st) return -1;
+        return st++;
     }
 };
 
 // ============================================================================
-// V7 Kernel: PTX Barriers + 5D TMA
+// V6 Kernel: Persistent with Tile Scheduling
 // ============================================================================
 
 template<int BM, int BN, int BK, int NUM_THREADS, int QSIZE, int NUM_SM>
 __global__ void __launch_bounds__(NUM_THREADS)
-gemm_v7_cluster_kernel(int M, int N, int K, __half* C,
-                       const __grid_constant__ CUtensorMap tensorMapA,
-                       const __grid_constant__ CUtensorMap tensorMapB) {
+gemm_v6_persistent_kernel(int M, int N, int K, __half* C,
+                          const __grid_constant__ CUtensorMap tensorMapA,
+                          const __grid_constant__ CUtensorMap tensorMapB) {
     constexpr int WGMMA_M = 64, WGMMA_K = 16, WGMMA_N = BN;
     constexpr int num_consumers = (NUM_THREADS / 128) - 1;
     constexpr int B_WG_M = BM / num_consumers;
 
     extern __shared__ __align__(128) uint8_t smem[];
-    SMemV7<BM, BN, BK, QSIZE> &s = *reinterpret_cast<SMemV7<BM, BN, BK, QSIZE>*>(smem);
+    SMemV6<BM, BN, BK, QSIZE> &s = *reinterpret_cast<SMemV6<BM, BN, BK, QSIZE>*>(smem);
     __half *sA = s.A;
     __half *sB = s.B;
 
-    // PTX barriers
-    __shared__ __align__(8) uint64_t full[QSIZE], empty[QSIZE];
+    #pragma nv_diag_suppress static_var_with_dynamic_init
+    __shared__ barrier full[QSIZE], empty[QSIZE];
 
     const int num_blocks_k = K / BK;
     int wg_idx = threadIdx.x / 128;
@@ -286,31 +240,34 @@ gemm_v7_cluster_kernel(int M, int N, int K, __half* C,
 
     if (threadIdx.x == 0) {
         for (int i = 0; i < QSIZE; ++i) {
-            init_barrier_v7(&full[i], 1, 0);
-            init_barrier_v7(&empty[i], num_consumers, 0);
+            init(&full[i], num_consumers * 128 + 1);
+            init(&empty[i], num_consumers * 128 + 1);
         }
+        cde::fence_proxy_async_shared_cta();
     }
     __syncthreads();
 
-    ScheduleV7<NUM_SM, BM, BN> schedule(M, N, blockIdx.x);
+    ScheduleV6<NUM_SM, BM, BN> schedule(M, N, blockIdx.x);
 
     // Producer warp-group
     if (wg_idx == 0) {
         constexpr int num_regs = (num_consumers <= 2 ? 24 : 32);
-        warpgroup_reg_dealloc_v7<num_regs>();
+        warpgroup_reg_dealloc_v6<num_regs>();
         if (tid == 0) {
-            int p = 0;
             int qidx = 0;
-            int num_block_m, num_block_n;
-            while (schedule.next(num_block_m, num_block_n)) {
+            for (int num_block = schedule.next(); num_block >= 0; num_block = schedule.next()) {
+                int num_block_n = num_block % (N / BN);
+                int num_block_m = num_block / (N / BN);
+
                 for (int block_k_iter = 0; block_k_iter < num_blocks_k; ++block_k_iter, ++qidx) {
-                    if (qidx == QSIZE) { qidx = 0; p ^= 1; }
-                    wait_v7(&empty[qidx], p);
-                    expect_bytes_v7(&full[qidx], (BK * BN + BK * BM) * sizeof(__half));
-                    load_async_v7(&sA[qidx * BK * BM], &tensorMapA, &full[qidx],
-                                  block_k_iter * BK, num_block_m * BM);
-                    load_async_v7(&sB[qidx * BK * BN], &tensorMapB, &full[qidx],
-                                  block_k_iter * BK, num_block_n * BN);
+                    if (qidx == QSIZE) qidx = 0;
+                    empty[qidx].wait(empty[qidx].arrive());
+                    cde::cp_async_bulk_tensor_2d_global_to_shared(
+                        &sA[qidx * BK * BM], &tensorMapA, block_k_iter * BK, num_block_m * BM, full[qidx]);
+                    cde::cp_async_bulk_tensor_2d_global_to_shared(
+                        &sB[qidx * BK * BN], &tensorMapB, block_k_iter * BK, num_block_n * BN, full[qidx]);
+                    barrier::arrival_token _ = cuda::device::barrier_arrive_tx(
+                        full[qidx], 1, (BK * BN + BK * BM) * sizeof(__half));
                 }
             }
         }
@@ -318,43 +275,37 @@ gemm_v7_cluster_kernel(int M, int N, int K, __half* C,
     // Consumer warp-groups
     else {
         constexpr int num_regs = (num_consumers == 1 ? 256 : (num_consumers == 2 ? 240 : 160));
-        warpgroup_reg_alloc_v7<num_regs>();
+        warpgroup_reg_alloc_v6<num_regs>();
         float d[B_WG_M / WGMMA_M][WGMMA_N / 16][8];
         --wg_idx;
 
         for (int i = 0; i < QSIZE; ++i) {
-            if (tid == 0) arrive_v7(&empty[i], 1);
+            barrier::arrival_token _ = empty[i].arrive();
         }
 
-        int p = 0;
         int qidx = 0;
-        int num_block_m, num_block_n;
-        while (schedule.next(num_block_m, num_block_n)) {
+        for (int num_block = schedule.next(); num_block >= 0; num_block = schedule.next()) {
+            int num_block_n = num_block % (N / BN);
+            int num_block_m = num_block / (N / BN);
             memset(d, 0, sizeof(d));
 
             for (int block_k_iter = 0; block_k_iter < num_blocks_k; ++block_k_iter, ++qidx) {
-                if (qidx == QSIZE) { qidx = 0; p ^= 1; }
-                wait_v7(&full[qidx], p);
+                if (qidx == QSIZE) qidx = 0;
+                full[qidx].wait(full[qidx].arrive());
 
-                warpgroup_arrive_v7();
+                warpgroup_arrive_v6();
                 #pragma unroll
                 for (int m_it = 0; m_it < B_WG_M / WGMMA_M; ++m_it) {
-                    __half *wgmma_sA = sA + qidx * BK * BM + 64 * (m_it + wg_idx * B_WG_M / WGMMA_M) * WGMMA_M;
-                    __half *wgmma_sB = sB + qidx * BK * BN;
+                    __half *wgmma_sA = sA + qidx * BK * BM + BK * (m_it + wg_idx * B_WG_M / WGMMA_M) * WGMMA_M;
                     #pragma unroll
-                    for (int bk = 0; bk < BK; bk += 64) {
-                        #pragma unroll
-                        for (int k_it = 0; k_it < 64 / WGMMA_K; ++k_it) {
-                            wgmma256_v7<1, 1, 1, 0, 0>(d[m_it], &wgmma_sA[k_it * WGMMA_K],
-                                                       &wgmma_sB[k_it * WGMMA_K]);
-                        }
-                        wgmma_sA += 64 * BM;
-                        wgmma_sB += 64 * BN;
+                    for (int k_it = 0; k_it < BK / WGMMA_K; ++k_it) {
+                        wgmma256_v6<1, 1, 1, 0, 0>(
+                            d[m_it], &wgmma_sA[k_it * WGMMA_K], &sB[qidx * BK * BN + k_it * WGMMA_K]);
                     }
                 }
-                warpgroup_commit_batch_v7();
-                warpgroup_wait_v7<0>();
-                if (tid == 0) arrive_v7(&empty[qidx], 1);
+                warpgroup_commit_batch_v6();
+                warpgroup_wait_v6<0>();
+                barrier::arrival_token _ = empty[qidx].arrive();
             }
 
             // Store results
@@ -387,34 +338,36 @@ gemm_v7_cluster_kernel(int M, int N, int K, __half* C,
 // Host Function
 // ============================================================================
 
-static CUtensorMap v7_tma_map_A;
-static CUtensorMap v7_tma_map_B;
-static int v7_prev_m = 0, v7_prev_n = 0, v7_prev_k = 0;
+static CUtensorMap v6_tma_map_A;
+static CUtensorMap v6_tma_map_B;
+static int v6_prev_m = 0, v6_prev_n = 0, v6_prev_k = 0;
 
-void gemm_v7_cluster_fp16(const __half* A, const __half* B, __half* C,
-                          int M, int N, int K, char lhs_format, char rhs_format,
-                          cudaStream_t stream) {
+void gemm_v6_persistent_tiling_fp16(const __half* A, const __half* B, __half* C,
+                                     int M, int N, int K, char lhs_format, char rhs_format,
+                                     cudaStream_t stream) {
     if (lhs_format != 'R' || rhs_format != 'C') {
-        fprintf(stderr, "ERROR: CUDA V7 only supports RC mode\n");
+        fprintf(stderr, "ERROR: CUDA V6 only supports RC mode\n");
         return;
     }
-    if (M % V7_BM != 0 || N % V7_BN != 0 || K % V7_BK != 0) {
-        fprintf(stderr, "ERROR: CUDA V7 requires M%%128==0, N%%256==0, K%%64==0\n");
+    if (M % V6_BM != 0 || N % V6_BN != 0 || K % V6_BK != 0) {
+        fprintf(stderr, "ERROR: CUDA V6 requires M%%128==0, N%%256==0, K%%64==0\n");
         return;
     }
 
-    if (M != v7_prev_m || N != v7_prev_n || K != v7_prev_k) {
-        v7_tma_map_A = create_tensor_map_5d_v7<V7_BM, V7_BK>(const_cast<__half*>(A), M, K);
-        v7_tma_map_B = create_tensor_map_5d_v7<V7_BN, V7_BK>(const_cast<__half*>(B), N, K);
-        v7_prev_m = M; v7_prev_n = N; v7_prev_k = K;
+    if (M != v6_prev_m || N != v6_prev_n || K != v6_prev_k) {
+        v6_tma_map_A = allocate_tensor_map_v6<V6_BM, V6_BK>(
+            const_cast<__half*>(A), M / V6_BM, K / V6_BK);
+        v6_tma_map_B = allocate_tensor_map_v6<V6_BN, V6_BK>(
+            const_cast<__half*>(B), N / V6_BN, K / V6_BK);
+        v6_prev_m = M; v6_prev_n = N; v6_prev_k = K;
     }
 
-    size_t sMemSize = sizeof(SMemV7<V7_BM, V7_BN, V7_BK, V7_QSIZE>);
-    auto kernel = gemm_v7_cluster_kernel<V7_BM, V7_BN, V7_BK, V7_NUM_THREADS, V7_QSIZE, V7_NUM_SM>;
+    size_t sMemSize = sizeof(SMemV6<V6_BM, V6_BN, V6_BK, V6_QSIZE>);
+    auto kernel = gemm_v6_persistent_kernel<V6_BM, V6_BN, V6_BK, V6_NUM_THREADS, V6_QSIZE, V6_NUM_SM>;
     cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, sMemSize);
 
-    kernel<<<V7_NUM_SM, V7_NUM_THREADS, sMemSize, stream>>>(
-        M, N, K, const_cast<__half*>(C), v7_tma_map_A, v7_tma_map_B);
+    kernel<<<V6_NUM_SM, V6_NUM_THREADS, sMemSize, stream>>>(
+        M, N, K, const_cast<__half*>(C), v6_tma_map_A, v6_tma_map_B);
 }
 
 } // namespace baseline

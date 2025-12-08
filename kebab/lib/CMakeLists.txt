@@ -14,9 +14,9 @@ add_library(kebab_cuda
     cuda/cuda_gemm_v3_warpgroup.cu
     cuda/cuda_gemm_v4_warpspec.cu
     cuda/cuda_gemm_v5_persistent.cu
-    cuda/cuda_gemm_v6_ptxbarrier.cu
-    cuda/cuda_gemm_v7_cluster.cu
-    cuda/cuda_gemm_v8_multicast.cu
+    cuda/cuda_gemm_v6_persistent_tiling.cu
+    cuda/cuda_gemm_v7_ptxbarrier_5dtma.cu
+    cuda/cuda_gemm_v8_cluster_multicast.cu
     cuda/cuda_gemm_v9_streamstore.cu
     cuda/cuda_gemm_v10_tmastore.cu
     cuda/cuda_gemm_v11_hilbert.cu

@@ -469,9 +469,9 @@ static CUtensorMap v8_tma_map_A;
 static CUtensorMap v8_tma_map_B;
 static int v8_prev_m = 0, v8_prev_n = 0, v8_prev_k = 0;
 
-void gemm_v8_multicast_fp16(const __half* A, const __half* B, __half* C,
-                            int M, int N, int K, char lhs_format, char rhs_format,
-                            cudaStream_t stream) {
+void gemm_v8_cluster_multicast_fp16(const __half* A, const __half* B, __half* C,
+                                     int M, int N, int K, char lhs_format, char rhs_format,
+                                     cudaStream_t stream) {
     if (lhs_format != 'R' || rhs_format != 'C') {
         fprintf(stderr, "ERROR: CUDA V8 only supports RC mode\n");
         return;
