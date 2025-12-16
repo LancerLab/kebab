@@ -60,8 +60,11 @@ __device__ uint64_t make_smem_desc_kk(__half* ptr) {
     uint32_t addr = static_cast<uint32_t>(__cvta_generic_to_shared(ptr));
     uint64_t desc = 0x0000000000000000;
     desc |= matrix_descriptor_encode(addr);
+    // For RC mode: K-major layout (K-SW128)
+    // stride = 16 bytes (stride between K blocks in 16-element chunks)
     desc |= matrix_descriptor_encode((uint64_t)16) << 16;     // stride in bytes
-    desc |= matrix_descriptor_encode((uint64_t)1024) << 32;   // leading dim
+    // leading_dim = 1024 bytes (leading dimension for K-major layout)
+    desc |= matrix_descriptor_encode((uint64_t)1024) << 32;   // leading dim in bytes
     desc |= 1llu << 62;  // 128B swizzle
     return desc;
 }
@@ -70,8 +73,11 @@ __device__ uint64_t make_smem_desc_kmn(__half* ptr) {
     uint32_t addr = static_cast<uint32_t>(__cvta_generic_to_shared(ptr));
     uint64_t desc = 0x0000000000000000;
     desc |= matrix_descriptor_encode(addr);
-    desc |= matrix_descriptor_encode((uint64_t)1024) << 16;     // stride in bytes
-    desc |= matrix_descriptor_encode((uint64_t)2048) << 32;   // leading dim
+    // For B matrix in RR mode: MN-major layout (N×K = 64×64)
+    // stride = 128 bytes (K * sizeof(__half) = 64 * 2)
+    desc |= matrix_descriptor_encode((uint64_t)128) << 16;     // stride in bytes
+    // leading_dim = 128 bytes (K * sizeof(__half) = 64 * 2)
+    desc |= matrix_descriptor_encode((uint64_t)128) << 32;   // leading dim in bytes
     desc |= 1llu << 62;  // 128B swizzle
     return desc;
 }
@@ -167,6 +173,47 @@ void create_tensor_map_v2(CUtensorMap *tma_map, __half* gmem_ptr,
     }
 }
 
+// Special TMA map creation for RR mode B matrix (K×N in global memory, viewed as N×K)
+// BlockMajorSize = BN (N dimension), BlockMinorSize = BK (K dimension)
+// total_N = N, total_K = K
+template <int BlockMajorSize, int BlockMinorSize>
+void create_tensor_map_v2_rr_b(CUtensorMap *tma_map, __half* gmem_ptr,
+                               int total_N, int total_K) {
+    void* gmem_address = (void*)gmem_ptr;
+    // For RR mode B: global memory is K×N (row-major), but we view it as N×K (column-major)
+    // B[n, k] = B_ptr[n + k * N] = B_ptr[k * N + n] (row-major K×N element access)
+    // gmem_prob_shape should be [N, K]
+    uint64_t gmem_prob_shape[5] = {
+        (uint64_t)total_N,  // N dimension (first dim, stride = 1)
+        (uint64_t)total_K,  // K dimension (second dim, stride = N)
+        1, 1, 1
+    };
+    // gmem_prob_stride for N×K (column-major view of K×N row-major)
+    // stride[0] = 1 element (implicit), stride[1] = N elements
+    uint64_t gmem_prob_stride[5] = {
+        sizeof(__half),           // stride[0] = 1 element
+        sizeof(__half) * total_N, // stride[1] = N elements (next K block)
+        0, 0, 0
+    };
+    // smem_box_shape: [BN, BK] for loading N×K block
+    uint32_t smem_box_shape[5] = {
+        uint32_t(BlockMajorSize),  // BN
+        uint32_t(BlockMinorSize),  // BK
+        1, 1, 1
+    };
+    uint32_t smem_box_stride[5] = {1, 1, 1, 1, 1};
+
+    CUresult result = cuTensorMapEncodeTiled(
+        tma_map, CU_TENSOR_MAP_DATA_TYPE_FLOAT16, 2, gmem_address, gmem_prob_shape,
+        gmem_prob_stride + 1, smem_box_shape, smem_box_stride,
+        CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
+        CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+
+    if (result != CUDA_SUCCESS) {
+        fprintf(stderr, "ERROR: cuTensorMapEncodeTiled failed with error %d\n", result);
+    }
+}
+
 template<int BlockMajorSize, int BlockMinorSize>
 static inline CUtensorMap* allocate_and_create_tensor_map_v2(
     __half* src, int blocks_height, int blocks_width) {
@@ -175,6 +222,18 @@ static inline CUtensorMap* allocate_and_create_tensor_map_v2(
     CUtensorMap tma_map_host;
     create_tensor_map_v2<BlockMajorSize, BlockMinorSize>(
         &tma_map_host, src, blocks_height, blocks_width);
+    cudaMemcpy(tma_map_d, &tma_map_host, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
+    return tma_map_d;
+}
+
+template<int BlockMajorSize, int BlockMinorSize>
+static inline CUtensorMap* allocate_and_create_tensor_map_v2_rr_b(
+    __half* src, int total_N, int total_K) {
+    CUtensorMap *tma_map_d;
+    cudaMalloc(&tma_map_d, sizeof(CUtensorMap));
+    CUtensorMap tma_map_host;
+    create_tensor_map_v2_rr_b<BlockMajorSize, BlockMinorSize>(
+        &tma_map_host, src, total_N, total_K);
     cudaMemcpy(tma_map_d, &tma_map_host, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
     return tma_map_d;
 }
@@ -340,14 +399,14 @@ gemm_v2_wgmma_tma_kernel_kmn(int M, int N, int K, __half* C,
     for (int block_k_iter = 0; block_k_iter < num_blocks_k; ++block_k_iter) {
         // TMA Load A and B tiles
         if (threadIdx.x == 0) {
+            // A: M×K layout, load block (block_k_iter, num_block_m)
             cde::cp_async_bulk_tensor_2d_global_to_shared(
-                &sA[0], tensorMapA, block_k_iter * V2_BK, num_block_m * V2_BM, barA);
+                &sA[0], tensorMapA, block_k_iter, num_block_m, barA);
             tokenA = cuda::device::barrier_arrive_tx(barA, 1, sizeof(sA));
 
-            // cde::cp_async_bulk_tensor_2d_global_to_shared(
-            //     &sB[0], tensorMapB, block_k_iter * V2_BK, num_block_n * V2_BN, barB);
+            // B: For RR mode, B is viewed as N×K (column-major), load block (num_block_n, block_k_iter)
             cde::cp_async_bulk_tensor_2d_global_to_shared(
-                &sB[0], tensorMapB, num_block_n * V2_BN, block_k_iter * V2_BK, barB);
+                &sB[0], tensorMapB, num_block_n, block_k_iter, barB);
             tokenB = cuda::device::barrier_arrive_tx(barB, 1, sizeof(sB));
         } else {
             tokenA = barA.arrive();
@@ -358,6 +417,9 @@ gemm_v2_wgmma_tma_kernel_kmn(int M, int N, int K, __half* C,
         __syncthreads();
 
         // WGMMA Compute: 4 iterations of K=16 each (total BK=64)
+        // For RR mode: A is K-major (stride in K = 1), B is MN-major (stride in K = V2_BN = 64)
+        // A offset: K=16 FP16 elements (K-major, K is contiguous)
+        // B offset: K=16 FP16 elements * N stride = 16 * 64 = 1024 FP16 elements (MN-major, N is contiguous)
         warpgroup_arrive_v2();
         wgmma64_fp16<1, 1, 1, 0, 1>(d, &sA[0], &sB[0]);
         wgmma64_fp16<1, 1, 1, 0, 1>(d, &sA[V2_WGMMA_K], &sB[V2_WGMMA_K * V2_BN]);
@@ -443,8 +505,9 @@ void gemm_v2_wgmma_tma_fp16(const __half* A, const __half* B, __half* C,
         } else if (lhs_format == 'R' && rhs_format == 'R') {
             v2_tma_map_A = allocate_and_create_tensor_map_v2<V2_BM, V2_BK>(
                 const_cast<__half*>(A), M / V2_BM, K / V2_BK);
-            v2_tma_map_B = allocate_and_create_tensor_map_v2<V2_BK, V2_BN>(
-                const_cast<__half*>(B), K / V2_BK, N / V2_BN);
+            // For RR mode: B is viewed as N×K (column-major), TMA map with total_N and total_K
+            v2_tma_map_B = allocate_and_create_tensor_map_v2_rr_b<V2_BN, V2_BK>(
+                const_cast<__half*>(B), N, K);
         }
 
         v2_prev_m = M;
