@@ -12,10 +12,29 @@
 #include "kebab/config/config_parser.h"
 
 #include <cute/tensor.hpp>
+#include <cute/atom/mma_traits_sm90_gmma.hpp>
+#include <cute/arch/mma_sm90_desc.hpp>
 #include "cutlass/cluster_launch.hpp"
 #include <string>
 
 using namespace cute;
+
+// Debug helper to print GmmaDescriptor fields
+__device__ void print_gmma_descriptor_wgmma(const char* name, uint64_t desc_val) {
+    // Extract bitfields from descriptor
+    uint16_t start_address = desc_val & 0x3FFF;                     // bits [0,14)
+    uint16_t leading_byte_offset = (desc_val >> 16) & 0x3FFF;       // bits [16,30)
+    uint16_t stride_byte_offset = (desc_val >> 32) & 0x3FFF;        // bits [32,46)
+    uint8_t base_offset = (desc_val >> 49) & 0x7;                   // bits [49,52)
+    uint8_t layout_type = (desc_val >> 62) & 0x3;                   // bits [62,64)
+
+    printf("%s: 0x%016llx\n", name, (unsigned long long)desc_val);
+    printf("  start_addr: 0x%04x (%d), LBO: 0x%04x (%d), SBO: 0x%04x (%d), base: %d, layout: %d\n",
+           start_address, start_address,
+           leading_byte_offset, leading_byte_offset,
+           stride_byte_offset, stride_byte_offset,
+           base_offset, layout_type);
+}
 
 namespace kebab {
 namespace cute {
@@ -154,6 +173,42 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
   }
 
   __syncthreads();
+
+  // DEBUG: Print GMMA descriptors from the fragments
+  // tCrA and tCrB contain GMMA descriptors for the WGMMA operation
+  // The descriptor is stored as uint64_t in the fragment's data
+  if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0) {
+    // Wait for prefetch to complete
+    cp_async_wait<0>();
+
+    printf("\n========== GMMA DESCRIPTOR DEBUG (wgmma.cu) ==========\n");
+    printf("sA layout: "); print(sA_layout); printf("\n");
+    printf("sB layout: "); print(sB_layout); printf("\n");
+
+    // Print fragment info
+    printf("tCrA layout: "); print(layout(tCrA)); printf("\n");
+    printf("tCrB layout: "); print(layout(tCrB)); printf("\n");
+
+    // For SS (shared-shared) WGMMA, the fragment contains GmmaDescriptors
+    // We can access them through the raw_pointer_cast of the tensor
+    // The first element of tCrA for pipe stage 0 should contain the descriptor
+    auto tCrA_slice = tCrA(_,_,_,0);  // First pipe stage
+    auto tCrB_slice = tCrB(_,_,_,0);
+
+    // Get the descriptor values - they are uint64_t
+    // The fragment's data() should give us access to the raw descriptors
+    // For SS mode, the fragment contains descriptors that encode smem address + layout info
+    printf("tCrA_slice(0) raw: "); print(tCrA_slice(0)); printf("\n");
+    printf("tCrB_slice(0) raw: "); print(tCrB_slice(0)); printf("\n");
+
+    // Access the descriptor directly from the DescriptorIterator
+    // tCrA_slice.data() returns a DescriptorIterator which has a desc_ member
+    auto desc_iter_a = tCrA_slice.data();
+    auto desc_iter_b = tCrB_slice.data();
+    print_gmma_descriptor_wgmma("A descriptor", desc_iter_a.desc_.desc_);
+    print_gmma_descriptor_wgmma("B descriptor", desc_iter_b.desc_.desc_);
+    printf("=====================================================\n\n");
+  }
 
   //
   // PIPELINED MAIN LOOP

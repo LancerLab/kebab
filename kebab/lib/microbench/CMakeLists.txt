@@ -84,3 +84,21 @@ target_include_directories(mbench_mma_wmma_sync PRIVATE ${CMAKE_SOURCE_DIR}/incl
 target_link_libraries(mbench_mma_wmma_sync microbench_common CUDA::cudart)
 set_target_properties(mbench_mma_wmma_sync PROPERTIES CUDA_ARCHITECTURES 80)
 target_compile_options(mbench_mma_wmma_sync PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-arch=sm_80>)
+
+# GMMA Descriptor Info microbenchmark
+add_executable(mbench_wgmma_descriptor_info
+    wgmma_descriptor_info.cu
+)
+target_include_directories(mbench_wgmma_descriptor_info PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(mbench_wgmma_descriptor_info microbench_common CUDA::cudart)
+set_target_properties(mbench_wgmma_descriptor_info PROPERTIES CUDA_ARCHITECTURES 90)
+target_compile_options(mbench_wgmma_descriptor_info PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-arch=sm_90 --expt-relaxed-constexpr>)
+
+# Simplified HGEMM kernel (no pipelining)
+add_executable(mbench_hgemm
+    hgemm_wgmma.cu
+)
+target_include_directories(mbench_hgemm PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(mbench_hgemm microbench_common kebab_cute CUDA::cudart)
+set_target_properties(mbench_hgemm PROPERTIES CUDA_ARCHITECTURES 90a)
+target_compile_options(mbench_hgemm PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-arch=sm_90a --expt-relaxed-constexpr>)

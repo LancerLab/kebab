@@ -19,6 +19,8 @@
 #include <cute/tensor.hpp>
 #include <cute/atom/mma_atom.hpp>
 #include <cute/atom/copy_atom.hpp>
+#include <cute/atom/mma_traits_sm90_gmma.hpp>  // For make_gmma_desc
+#include <cute/arch/mma_sm90_desc.hpp>          // For GmmaDescriptor
 #include "cutlass/cluster_launch.hpp"
 #include "cutlass/arch/barrier.h"
 #include "cutlass/pipeline/sm90_pipeline.hpp"
@@ -30,6 +32,23 @@ namespace cute {
 using namespace ::cute;  // Use global cute namespace
 
 using half_t = ::cute::half_t;
+
+// Debug helper to print GmmaDescriptor fields
+__device__ void print_gmma_descriptor(const char* name, uint64_t desc_val) {
+    // Extract bitfields from descriptor
+    uint16_t start_address = desc_val & 0x3FFF;                     // bits [0,14)
+    uint16_t leading_byte_offset = (desc_val >> 16) & 0x3FFF;       // bits [16,30)
+    uint16_t stride_byte_offset = (desc_val >> 32) & 0x3FFF;        // bits [32,46)
+    uint8_t base_offset = (desc_val >> 49) & 0x7;                   // bits [49,52)
+    uint8_t layout_type = (desc_val >> 62) & 0x3;                   // bits [62,64)
+
+    printf("%s Descriptor: 0x%016llx\n", name, (unsigned long long)desc_val);
+    printf("  start_addr :  0x%04x (%d)\n", start_address, start_address);
+    printf("  LBO        :  0x%04x (%d)\n", leading_byte_offset, leading_byte_offset);
+    printf("  SBO        :  0x%04x (%d)\n", stride_byte_offset, stride_byte_offset);
+    printf("  base_offset:  0x%01x (%d)\n", base_offset, base_offset);
+    printf("  layout_type:  0x%01x (%d) [B128=1,B64=2,B32=3,INTER=0]\n", layout_type, layout_type);
+}
 
 template <class ElementA,
           class ElementB,

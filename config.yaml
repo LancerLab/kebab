@@ -81,7 +81,7 @@ operators:
     # - RC: A is row-major, B is column-major
     # - CR: A is column-major, B is row-major
     # - CC: Both A and B are column-major
-    modes: [RC, RR]
+    modes: [RR]
     # Precision: float32, float16, bfloat16
     # Note: bfloat16 is only supported by CUDA GEMM kernels (not CuTe)
     precisions: [float16]

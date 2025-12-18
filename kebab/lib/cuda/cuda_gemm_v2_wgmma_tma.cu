@@ -35,10 +35,11 @@ namespace baseline {
 namespace cde = cuda::device::experimental;
 using barrier = cuda::barrier<cuda::thread_scope_block>;
 
-// Encode shared memory address for WGMMA descriptor
-__device__ static inline uint64_t matrix_descriptor_encode(uint64_t x) {
-    return (((x) & 0x3FFFF) >> 0x4);
-}
+// Tile sizes for V2 kernel
+constexpr int V2_BM_TILE = 64;
+constexpr int V2_BN_TILE = 64;
+constexpr int V2_BK_TILE = 64;
+constexpr int V2_WGMMA_K_TILE = 16;
 
 // WGMMA fence/sync primitives
 __device__ void warpgroup_arrive_v2() {
@@ -55,39 +56,90 @@ __device__ void warpgroup_wait_v2() {
     asm volatile("wgmma.wait_group.sync.aligned %0;\n" ::"n"(N) : "memory");
 }
 
-// Create shared memory descriptor for WGMMA
-__device__ uint64_t make_smem_desc_kk(__half* ptr) {
+// ============================================================================
+// GMMA Descriptor Generation (based on CUTLASS make_gmma_desc logic)
+// ============================================================================
+//
+// GmmaDescriptor bit layout (from cute/arch/mma_sm90_desc.hpp):
+//   bits [0,14)   : start_address_ (smem addr >> 4)
+//   bits [16,30)  : leading_byte_offset_ (in uint128_t units, i.e., bytes >> 4)
+//   bits [32,46)  : stride_byte_offset_ (in uint128_t units, i.e., bytes >> 4)
+//   bits [49,52)  : base_offset_ (always 0)
+//   bits [62,64)  : layout_type_ (B128=1, B64=2, B32=3, INTERLEAVE=0)
+//
+// For SW128 (B128) layouts:
+//   layout_type = 1
+//   W = 8 (width factor)
+//
+// K-major B128 layout ((8,n),(T,2)) in uint128_t:
+//   - T = 8 (128 bits / 16 bits per half_t = 8 half_t per uint128_t)
+//   - For 64x64 tile with half_t, K=64 means 64/8=8 uint128_t per row
+//   - For WGMMA k=16, that's 16/8=2 uint128_t
+//   - stride_byte_offset = stride between rows = 8 uint128_t (for 64-wide K)
+//   - leading_byte_offset = 1 (K stride is contiguous)
+//
+// MN-major B128 layout ((T,8,n),(8,k)) in uint128_t:
+//   - For half_t: T = 8
+//   - stride_byte_offset = k-stride (between K tiles)
+//   - leading_byte_offset = 1 (MN stride within 8-element group)
+
+// Create GMMA descriptor for MN-major layout
+// MN-major means M/N dimension is contiguous in memory
+// Values derived from CUTE kernel debug output:
+//   - LBO = 1, SBO = 64, layout_type = 1 (B128)
+__device__ uint64_t make_smem_desc_mn(__half* ptr) {
+    uint64_t desc = 0;
     uint32_t addr = static_cast<uint32_t>(__cvta_generic_to_shared(ptr));
-    uint64_t desc = 0x0000000000000000;
-    desc |= matrix_descriptor_encode(addr);
-    // For RC mode: K-major layout (K-SW128)
-    // stride = 16 bytes (stride between K blocks in 16-element chunks)
-    desc |= matrix_descriptor_encode((uint64_t)16) << 16;     // stride in bytes
-    // leading_dim = 1024 bytes (leading dimension for K-major layout)
-    desc |= matrix_descriptor_encode((uint64_t)1024) << 32;   // leading dim in bytes
-    desc |= 1llu << 62;  // 128B swizzle
+
+    // Encode fields (values from CUTE kernel debug output)
+    uint64_t start_address = (addr >> 4) & 0x3FFF;         // bits [0,14)
+    uint64_t leading_byte_offset = 1;                       // bits [16,30), LBO = 1
+    uint64_t stride_byte_offset = 64;                       // bits [32,46), SBO = 64
+    uint64_t base_offset = 0;                               // bits [49,52)
+    uint64_t layout_type = 1;                               // bits [62,64), B128
+
+    desc = start_address
+         | (leading_byte_offset << 16)
+         | (stride_byte_offset << 32)
+         | (base_offset << 49)
+         | (layout_type << 62);
+
     return desc;
 }
 
-__device__ uint64_t make_smem_desc_kmn(__half* ptr) {
+// Create GMMA descriptor for K-major layout
+// K-major means K dimension is contiguous in memory
+// Values derived from CUTE kernel debug output:
+//   - LBO = 0, SBO = 128, layout_type = 1 (B128)
+__device__ uint64_t make_smem_desc_k(__half* ptr) {
+    uint64_t desc = 0;
     uint32_t addr = static_cast<uint32_t>(__cvta_generic_to_shared(ptr));
-    uint64_t desc = 0x0000000000000000;
-    desc |= matrix_descriptor_encode(addr);
-    // For B matrix in RR mode: MN-major layout (N×K = 64×64)
-    // stride = 128 bytes (K * sizeof(__half) = 64 * 2)
-    desc |= matrix_descriptor_encode((uint64_t)128) << 16;     // stride in bytes
-    // leading_dim = 128 bytes (K * sizeof(__half) = 64 * 2)
-    desc |= matrix_descriptor_encode((uint64_t)128) << 32;   // leading dim in bytes
-    desc |= 1llu << 62;  // 128B swizzle
+
+    // Encode fields (values from CUTE kernel debug output)
+    uint64_t start_address = (addr >> 4) & 0x3FFF;         // bits [0,14)
+    uint64_t leading_byte_offset = 0;                       // bits [16,30), LBO = 0
+    uint64_t stride_byte_offset = 128;                      // bits [32,46), SBO = 128
+    uint64_t base_offset = 0;                               // bits [49,52)
+    uint64_t layout_type = 1;                               // bits [62,64), B128
+
+    desc = start_address
+         | (leading_byte_offset << 16)
+         | (stride_byte_offset << 32)
+         | (base_offset << 49)
+         | (layout_type << 62);
+
     return desc;
 }
 
 // WGMMA 64x64x16 for FP16 (produces FP32 accumulator)
+// TransB=0: RC mode (A row-major, B col-major) -> both use MN-major descriptor
+// TransB=1: RR mode (A row-major, B row-major) -> A uses MN-major, B uses K-major
 template<int ScaleD, int ScaleA, int ScaleB, int TransA, int TransB>
 __device__ void wgmma64_fp16(float d[4][8], __half* sA, __half* sB) {
     if constexpr (TransB == 0) {
-        uint64_t desc_a = make_smem_desc_kk(&sA[0]);
-        uint64_t desc_b = make_smem_desc_kk(&sB[0]);
+        // RC mode: both A and B use MN-major layout
+        uint64_t desc_a = make_smem_desc_mn(&sA[0]);
+        uint64_t desc_b = make_smem_desc_mn(&sB[0]);
         asm volatile(
             "{\n"
             "wgmma.mma_async.sync.aligned.m64n64k16.f32.f16.f16 "
@@ -111,8 +163,23 @@ __device__ void wgmma64_fp16(float d[4][8], __half* sA, __half* sB) {
             "n"(int32_t(ScaleD)), "n"(int32_t(ScaleA)),
             "n"(int32_t(ScaleB)), "n"(int32_t(TransA)), "n"(int32_t(TransB)));
     } else if constexpr (TransB == 1) {
-        uint64_t desc_a = make_smem_desc_kk(&sA[0]);
-        uint64_t desc_b = make_smem_desc_kmn(&sB[0]);
+        // RR mode: A uses MN-major, B uses K-major
+        uint64_t desc_a = make_smem_desc_mn(&sA[0]);
+        uint64_t desc_b = make_smem_desc_k(&sB[0]);
+
+        // Debug output for first warp
+        if (blockIdx.x == 0 && threadIdx.x == 0) {
+            printf("RR WGMMA descriptors:\n");
+            printf("  desc_a: 0x%016llx (LBO=%llu, SBO=%llu)\n",
+                   (unsigned long long)desc_a,
+                   (unsigned long long)((desc_a >> 16) & 0x3FFF),
+                   (unsigned long long)((desc_a >> 32) & 0x3FFF));
+            printf("  desc_b: 0x%016llx (LBO=%llu, SBO=%llu)\n",
+                   (unsigned long long)desc_b,
+                   (unsigned long long)((desc_b >> 16) & 0x3FFF),
+                   (unsigned long long)((desc_b >> 32) & 0x3FFF));
+        }
+
         asm volatile(
             "{\n"
             "wgmma.mma_async.sync.aligned.m64n64k16.f32.f16.f16 "
@@ -361,8 +428,9 @@ gemm_v2_wgmma_tma_kernel_kmn(int M, int N, int K, __half* C,
                           const CUtensorMap* tensorMapA,
                           const CUtensorMap* tensorMapB) {
     // Shared memory for A and B tiles
+    // A: M×K layout (MN-major), size = BM * BK
+    // B: N×K layout (K-major), size = BN * BK
     __shared__ alignas(128) __half sA[V2_BM * V2_BK];
-    // __shared__ alignas(128) __half sB[V2_BK * V2_BN];
     __shared__ alignas(128) __half sB[V2_BN * V2_BK];
 
     // Accumulator: 64x64 output = 4 x 8 floats per thread (128 threads)
@@ -399,14 +467,24 @@ gemm_v2_wgmma_tma_kernel_kmn(int M, int N, int K, __half* C,
     for (int block_k_iter = 0; block_k_iter < num_blocks_k; ++block_k_iter) {
         // TMA Load A and B tiles
         if (threadIdx.x == 0) {
-            // A: M×K layout, load block (block_k_iter, num_block_m)
+            // Debug output for first block
+            if (blockIdx.x == 0 && block_k_iter == 0) {
+                printf("RR mode: M=%d, N=%d, K=%d\n", M, N, K);
+                printf("  num_block_m=%d, num_block_n=%d, block_k_iter=%d\n",
+                       num_block_m, num_block_n, block_k_iter);
+                printf("  A TMA coords: (%d, %d)\n", block_k_iter * V2_BK, num_block_m * V2_BM);
+                printf("  B TMA coords: (%d, %d)\n", num_block_n * V2_BN, block_k_iter * V2_BK);
+            }
+
+            // A: M×K layout (row-major), load block at (k, m) in element coordinates
             cde::cp_async_bulk_tensor_2d_global_to_shared(
-                &sA[0], tensorMapA, block_k_iter, num_block_m, barA);
+                &sA[0], tensorMapA, block_k_iter * V2_BK, num_block_m * V2_BM, barA);
             tokenA = cuda::device::barrier_arrive_tx(barA, 1, sizeof(sA));
 
-            // B: For RR mode, B is viewed as N×K (column-major), load block (num_block_n, block_k_iter)
+            // B: K×N layout (row-major), viewed as N×K (column-major)
+            // TMA map shape is [N, K], load block at (n, k) in element coordinates
             cde::cp_async_bulk_tensor_2d_global_to_shared(
-                &sB[0], tensorMapB, num_block_n, block_k_iter, barB);
+                &sB[0], tensorMapB, num_block_n * V2_BN, block_k_iter * V2_BK, barB);
             tokenB = cuda::device::barrier_arrive_tx(barB, 1, sizeof(sB));
         } else {
             tokenA = barA.arrive();
@@ -528,6 +606,11 @@ void gemm_v2_wgmma_tma_fp16(const __half* A, const __half* B, __half* C,
 // ============================================================================
 // BFloat16 Version
 // ============================================================================
+
+// Encode shared memory address for WGMMA descriptor
+__device__ static inline uint64_t matrix_descriptor_encode(uint64_t x) {
+    return (((x) & 0x3FFFF) >> 0x4);
+}
 
 __device__ uint64_t make_smem_desc_v2_bf16(__nv_bfloat16* ptr) {
     uint32_t addr = static_cast<uint32_t>(__cvta_generic_to_shared(ptr));
