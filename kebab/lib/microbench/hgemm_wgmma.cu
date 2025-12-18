@@ -155,9 +155,9 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
   Tensor tCsB = thr_mma.partition_B(sB);                               // (MMA,MMA_N,MMA_K,PIPE)
   Tensor tCgC = thr_mma.partition_C(gC);                               // (MMA,MMA_M,MMA_N)
 
-  // Allocate registers for pipelining
-  Tensor tCrA = thr_mma.make_fragment_A(tCsA);                         // (MMA,MMA_M,MMA_K,PIPE)
-  Tensor tCrB = thr_mma.make_fragment_B(tCsB);                         // (MMA,MMA_N,MMA_K,PIPE)
+  // Allocate registers for A and B (no pipelining - single stage)
+  Tensor tCrA = thr_mma.make_fragment_A(tCsA);                         // (MMA,MMA_M,MMA_K)
+  Tensor tCrB = thr_mma.make_fragment_B(tCsB);                         // (MMA,MMA_N,MMA_K)
   // Allocate the accumulators -- same size as the projected data
   Tensor tCrC = thr_mma.make_fragment_C(tCgC);                         // (MMA,MMA_M,MMA_N)
 
@@ -201,80 +201,44 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
   }
 #endif
 
-#if 1
-
   // Total number of k-tiles
   auto K_TILE_MAX  = size<3>(tAgA);
-  // Number of pipelined k-tiles in smem
-  auto K_PIPE_MAX  = size<3>(tAsA);
 
   //
-  // PREFETCH
+  // SERIAL MAIN LOOP (no pipelining)
   //
-
-  // Prefetch all but the last
-  CUTE_UNROLL
-  for (int k = 0; k < K_PIPE_MAX-1; ++k)
-  {
-    copy(copy_a, tAgA(_,_,_,k), tAsA(_,_,_,k));
-    copy(copy_b, tBgB(_,_,_,k), tBsB(_,_,_,k));
-    cp_async_fence();
-  }
-
-  // Clear the accumulators
-  clear(tCrC);
-
-  __syncthreads();
-
-  //
-  // PIPELINED MAIN LOOP
-  //
-
-  // Current pipe to read from
-  int k_pipe_read  = 0;
-  // Current pipe to write to
-  int k_pipe_write = K_PIPE_MAX-1;
 
   CUTE_NO_UNROLL
   for (int k_tile = 0; k_tile < K_TILE_MAX; ++k_tile)
   {
-    int k_tile_next = k_tile + (K_PIPE_MAX-1);
-    k_tile_next = (k_tile_next >= K_TILE_MAX) ? K_TILE_MAX-1 : k_tile_next;
-
     //
-    // Copy gmem to smem for k_tile_write
+    // Copy gmem to smem
     //
-
-    copy(copy_a, tAgA(_,_,_,k_tile_next), tAsA(_,_,_,k_pipe_write));
-    copy(copy_b, tBgB(_,_,_,k_tile_next), tBsB(_,_,_,k_pipe_write));
+    copy(copy_a, tAgA(_,_,_,k_tile), tAsA);
+    copy(copy_b, tBgB(_,_,_,k_tile), tBsB);
     cp_async_fence();
-
-    // Advance k_pipe_write
-    ++k_pipe_write;
-    k_pipe_write = (k_pipe_write == K_PIPE_MAX) ? 0 : k_pipe_write;
-
-    //
-    // Compute on k_tile
-    //
-
-    // Wait on all cp.async -- optimize by pipelining to overlap GMEM reads
     cp_async_wait<0>();
 
+    __syncthreads();
+
+    //
+    // Load smem to registers
+    //
+    copy(tCsA, tCrA);
+    copy(tCsB, tCrB);
+
+    __syncthreads();
+
+    //
+    // Compute GMMA
+    //
     warpgroup_fence_operand(tCrC);
     warpgroup_arrive();
-    // (V,M,K) x (V,N,K) => (V,M,N)
-    cute::gemm(mma, tCrA(_,_,_,k_pipe_read), tCrB(_,_,_,k_pipe_read), tCrC);
+    gemm(mma, tCrA, tCrB, tCrC);
     warpgroup_commit_batch();
-    /// Wait on the GMMA barrier for K_PIPE_MMAS (or fewer) outstanding to ensure smem_pipe_write is consumed
     warpgroup_wait<0>();
     warpgroup_fence_operand(tCrC);
-
-    // Advance k_pipe_read
-    ++k_pipe_read;
-    k_pipe_read = (k_pipe_read == K_PIPE_MAX) ? 0 : k_pipe_read;
   }
-
-#endif
 
   //
   // Epilogue
@@ -311,11 +275,10 @@ gemm_kk(int m, int n, int k,
   auto bN = Int<128>{};
   auto bK = Int< 64>{};
   auto cta_tiler = make_shape(bM, bN, bK);                   // (BLK_M, BLK_N, BLK_K)
-  auto bP = Int<3>{};  // Pipeline
 
-  // Define the smem layouts (static) - K-major for both
-  auto sA = tile_to_shape(GMMA::Layout_K_SW128_Atom<TA>{}, make_shape(bM,bK,bP));
-  auto sB = tile_to_shape(GMMA::Layout_K_SW128_Atom<TB>{}, make_shape(bN,bK,bP));
+  // Define the smem layouts (static) - K-major for both, no pipelining
+  auto sA = tile_to_shape(GMMA::Layout_K_SW128_Atom<TA>{}, make_shape(bM,bK));
+  auto sB = tile_to_shape(GMMA::Layout_K_SW128_Atom<TB>{}, make_shape(bN,bK));
 
   // Define the thread layouts (static) - K-major for both
   TiledCopy copyA = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, TA>{},
