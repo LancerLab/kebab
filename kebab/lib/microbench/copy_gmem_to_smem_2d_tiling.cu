@@ -26,6 +26,7 @@
 #include <cuda_runtime.h>
 #include <cute/tensor.hpp>
 #include <cute/algorithm/copy.hpp>
+#include <cute/atom/copy_traits_sm90.hpp>
 
 using namespace kebab::microbench;
 using namespace kebab::utils;
@@ -309,7 +310,7 @@ __global__ void kernel_copy_2d_cute_tiled(const float* __restrict__ gmem,
 __global__ void kernel_copy_2d_cute_tiled_float4(const float* __restrict__ gmem,
                                                  float* __restrict__ output,
                                                  int matrix_size) {
-    extern __shared__ float smem_cute[];
+    extern __shared__ float alignas(128) smem_cute[];
 
     // Define global memory layout and tensors
     auto gmem_layout = make_layout(make_shape(matrix_size, matrix_size));
@@ -317,8 +318,14 @@ __global__ void kernel_copy_2d_cute_tiled_float4(const float* __restrict__ gmem,
     auto out_tensor = make_tensor(make_gmem_ptr(output), gmem_layout);
 
     // Define shared memory layout and tensor
-    auto smem_layout = make_layout(make_shape(Int<TILE_SIZE>{}, Int<TILE_SIZE>{}));
+    // auto smem_layout = make_layout(make_shape(Int<TILE_SIZE>{}, Int<TILE_SIZE>{}));
+    auto smem_layout = tile_to_shape(SM90::GMMA::Layout_K_SW128_Atom<float>{}, make_shape(Int<TILE_SIZE>{}, Int<TILE_SIZE>{}));
     auto smem_tensor = make_tensor(make_smem_ptr(smem_cute), smem_layout);
+    // auto smem_desc = SM90::GMMA::make_gmma_desc<SM90::GMMA::Major::K>(smem_tensor);
+    // // print this desc to get LBO and SBO
+    // if (blockIdx.x == 0 && threadIdx.x == 0) {
+    //     printf("Full descriptor: %016llx\n", smem_desc.desc_);
+    // }
 
     // Block level tiling on gmem
     Tensor tiled_gmem_tensors = tiled_divide(gmem_tensor, make_shape(Int<TILE_SIZE>{}, Int<TILE_SIZE>{}));

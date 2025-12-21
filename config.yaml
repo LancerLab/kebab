@@ -71,7 +71,7 @@ operators:
     init_method: rand-rand
     # Matrix sizes for benchmarking (M=N=K for square matrices)
     # matrix_sizes: [1024, 2048, 4096, 8192]
-    matrix_sizes: [64]
+    matrix_sizes: [128]
     # Operation modes: specify storage format of LHS and RHS
     # Format: <LHS_format><RHS_format>
     # - R: Row-major storage
@@ -81,7 +81,7 @@ operators:
     # - RC: A is row-major, B is column-major
     # - CR: A is column-major, B is row-major
     # - CC: Both A and B are column-major
-    modes: [RR]
+    modes: [RC]
     # Precision: float32, float16, bfloat16
     # Note: bfloat16 is only supported by CUDA GEMM kernels (not CuTe)
     precisions: [float16]

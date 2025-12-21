@@ -35,12 +35,6 @@ namespace baseline {
 namespace cde = cuda::device::experimental;
 using barrier = cuda::barrier<cuda::thread_scope_block>;
 
-// Tile sizes for V2 kernel
-constexpr int V2_BM_TILE = 64;
-constexpr int V2_BN_TILE = 64;
-constexpr int V2_BK_TILE = 64;
-constexpr int V2_WGMMA_K_TILE = 16;
-
 // WGMMA fence/sync primitives
 __device__ void warpgroup_arrive_v2() {
     asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory");
@@ -117,16 +111,18 @@ __device__ uint64_t make_smem_desc_k(__half* ptr) {
 
     // Encode fields (values from CUTE kernel debug output)
     uint64_t start_address = (addr >> 4) & 0x3FFF;         // bits [0,14)
-    uint64_t leading_byte_offset = 0;                       // bits [16,30), LBO = 0
-    uint64_t stride_byte_offset = 128;                      // bits [32,46), SBO = 128
+    uint64_t leading_byte_offset = 1;                       // bits [16,30), LBO = 0
+    // uint64_t stride_byte_offset = 64;                      // bits [32,46), SBO = 128
+    // uint64_t stride_byte_offset = 32;                      // bits [32,46), SBO = 128
+    uint64_t stride_byte_offset = 16;                      // bits [32,46), SBO = 128
     uint64_t base_offset = 0;                               // bits [49,52)
-    uint64_t layout_type = 1;                               // bits [62,64), B128
+    uint64_t swizzle_type = 3;                               // bits [62,64), B128
 
     desc = start_address
          | (leading_byte_offset << 16)
          | (stride_byte_offset << 32)
          | (base_offset << 49)
-         | (layout_type << 62);
+         | (swizzle_type << 62);
 
     return desc;
 }
@@ -138,48 +134,8 @@ template<int ScaleD, int ScaleA, int ScaleB, int TransA, int TransB>
 __device__ void wgmma64_fp16(float d[4][8], __half* sA, __half* sB) {
     if constexpr (TransB == 0) {
         // RC mode: both A and B use MN-major layout
-        uint64_t desc_a = make_smem_desc_mn(&sA[0]);
-        uint64_t desc_b = make_smem_desc_mn(&sB[0]);
-        asm volatile(
-            "{\n"
-            "wgmma.mma_async.sync.aligned.m64n64k16.f32.f16.f16 "
-            "{%0,   %1,   %2,   %3,   %4,   %5,   %6,   %7,   "
-            " %8,   %9,   %10,  %11,  %12,  %13,  %14,  %15,  "
-            " %16,  %17,  %18,  %19,  %20,  %21,  %22,  %23,  "
-            " %24,  %25,  %26,  %27,  %28,  %29,  %30,  %31},"
-            " %32,"
-            " %33,"
-            " %34, %35, %36, %37, %38;\n"
-            "}\n"
-            : "+f"(d[0][0]), "+f"(d[0][1]), "+f"(d[0][2]), "+f"(d[0][3]),
-            "+f"(d[0][4]), "+f"(d[0][5]), "+f"(d[0][6]), "+f"(d[0][7]),
-            "+f"(d[1][0]), "+f"(d[1][1]), "+f"(d[1][2]), "+f"(d[1][3]),
-            "+f"(d[1][4]), "+f"(d[1][5]), "+f"(d[1][6]), "+f"(d[1][7]),
-            "+f"(d[2][0]), "+f"(d[2][1]), "+f"(d[2][2]), "+f"(d[2][3]),
-            "+f"(d[2][4]), "+f"(d[2][5]), "+f"(d[2][6]), "+f"(d[2][7]),
-            "+f"(d[3][0]), "+f"(d[3][1]), "+f"(d[3][2]), "+f"(d[3][3]),
-            "+f"(d[3][4]), "+f"(d[3][5]), "+f"(d[3][6]), "+f"(d[3][7])
-            : "l"(desc_a), "l"(desc_b),
-            "n"(int32_t(ScaleD)), "n"(int32_t(ScaleA)),
-            "n"(int32_t(ScaleB)), "n"(int32_t(TransA)), "n"(int32_t(TransB)));
-    } else if constexpr (TransB == 1) {
-        // RR mode: A uses MN-major, B uses K-major
-        uint64_t desc_a = make_smem_desc_mn(&sA[0]);
+        uint64_t desc_a = make_smem_desc_k(&sA[0]);
         uint64_t desc_b = make_smem_desc_k(&sB[0]);
-
-        // Debug output for first warp
-        if (blockIdx.x == 0 && threadIdx.x == 0) {
-            printf("RR WGMMA descriptors:\n");
-            printf("  desc_a: 0x%016llx (LBO=%llu, SBO=%llu)\n",
-                   (unsigned long long)desc_a,
-                   (unsigned long long)((desc_a >> 16) & 0x3FFF),
-                   (unsigned long long)((desc_a >> 32) & 0x3FFF));
-            printf("  desc_b: 0x%016llx (LBO=%llu, SBO=%llu)\n",
-                   (unsigned long long)desc_b,
-                   (unsigned long long)((desc_b >> 16) & 0x3FFF),
-                   (unsigned long long)((desc_b >> 32) & 0x3FFF));
-        }
-
         asm volatile(
             "{\n"
             "wgmma.mma_async.sync.aligned.m64n64k16.f32.f16.f16 "
@@ -202,6 +158,47 @@ __device__ void wgmma64_fp16(float d[4][8], __half* sA, __half* sB) {
             : "l"(desc_a), "l"(desc_b),
             "n"(int32_t(ScaleD)), "n"(int32_t(ScaleA)),
             "n"(int32_t(ScaleB)), "n"(int32_t(TransA)), "n"(int32_t(TransB)));
+    // } else if constexpr (TransB == 1) {
+    //     assert(false);
+    //     // RR mode: A uses MN-major, B uses K-major
+    //     uint64_t desc_a = make_smem_desc_mn(&sA[0]);
+    //     uint64_t desc_b = make_smem_desc_k(&sB[0]);
+
+    //     // // Debug output for first warp
+    //     // if (blockIdx.x == 0 && threadIdx.x == 0) {
+    //     //     printf("RR WGMMA descriptors:\n");
+    //     //     printf("  desc_a: 0x%016llx (LBO=%llu, SBO=%llu)\n",
+    //     //            (unsigned long long)desc_a,
+    //     //            (unsigned long long)((desc_a >> 16) & 0x3FFF),
+    //     //            (unsigned long long)((desc_a >> 32) & 0x3FFF));
+    //     //     printf("  desc_b: 0x%016llx (LBO=%llu, SBO=%llu)\n",
+    //     //            (unsigned long long)desc_b,
+    //     //            (unsigned long long)((desc_b >> 16) & 0x3FFF),
+    //     //            (unsigned long long)((desc_b >> 32) & 0x3FFF));
+    //     // }
+
+    //     asm volatile(
+    //         "{\n"
+    //         "wgmma.mma_async.sync.aligned.m64n64k16.f32.f16.f16 "
+    //         "{%0,   %1,   %2,   %3,   %4,   %5,   %6,   %7,   "
+    //         " %8,   %9,   %10,  %11,  %12,  %13,  %14,  %15,  "
+    //         " %16,  %17,  %18,  %19,  %20,  %21,  %22,  %23,  "
+    //         " %24,  %25,  %26,  %27,  %28,  %29,  %30,  %31},"
+    //         " %32,"
+    //         " %33,"
+    //         " %34, %35, %36, %37, %38;\n"
+    //         "}\n"
+    //         : "+f"(d[0][0]), "+f"(d[0][1]), "+f"(d[0][2]), "+f"(d[0][3]),
+    //         "+f"(d[0][4]), "+f"(d[0][5]), "+f"(d[0][6]), "+f"(d[0][7]),
+    //         "+f"(d[1][0]), "+f"(d[1][1]), "+f"(d[1][2]), "+f"(d[1][3]),
+    //         "+f"(d[1][4]), "+f"(d[1][5]), "+f"(d[1][6]), "+f"(d[1][7]),
+    //         "+f"(d[2][0]), "+f"(d[2][1]), "+f"(d[2][2]), "+f"(d[2][3]),
+    //         "+f"(d[2][4]), "+f"(d[2][5]), "+f"(d[2][6]), "+f"(d[2][7]),
+    //         "+f"(d[3][0]), "+f"(d[3][1]), "+f"(d[3][2]), "+f"(d[3][3]),
+    //         "+f"(d[3][4]), "+f"(d[3][5]), "+f"(d[3][6]), "+f"(d[3][7])
+    //         : "l"(desc_a), "l"(desc_b),
+    //         "n"(int32_t(ScaleD)), "n"(int32_t(ScaleA)),
+    //         "n"(int32_t(ScaleB)), "n"(int32_t(TransA)), "n"(int32_t(TransB)));
     }
 
 }
@@ -232,7 +229,7 @@ void create_tensor_map_v2(CUtensorMap *tma_map, __half* gmem_ptr,
     CUresult result = cuTensorMapEncodeTiled(
         tma_map, CU_TENSOR_MAP_DATA_TYPE_FLOAT16, 2, gmem_address, gmem_prob_shape,
         gmem_prob_stride + 1, smem_box_shape, smem_box_stride,
-        CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
+        CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_32B,
         CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
 
     if (result != CUDA_SUCCESS) {
@@ -243,43 +240,43 @@ void create_tensor_map_v2(CUtensorMap *tma_map, __half* gmem_ptr,
 // Special TMA map creation for RR mode B matrix (K×N in global memory, viewed as N×K)
 // BlockMajorSize = BN (N dimension), BlockMinorSize = BK (K dimension)
 // total_N = N, total_K = K
-template <int BlockMajorSize, int BlockMinorSize>
-void create_tensor_map_v2_rr_b(CUtensorMap *tma_map, __half* gmem_ptr,
-                               int total_N, int total_K) {
-    void* gmem_address = (void*)gmem_ptr;
-    // For RR mode B: global memory is K×N (row-major), but we view it as N×K (column-major)
-    // B[n, k] = B_ptr[n + k * N] = B_ptr[k * N + n] (row-major K×N element access)
-    // gmem_prob_shape should be [N, K]
-    uint64_t gmem_prob_shape[5] = {
-        (uint64_t)total_N,  // N dimension (first dim, stride = 1)
-        (uint64_t)total_K,  // K dimension (second dim, stride = N)
-        1, 1, 1
-    };
-    // gmem_prob_stride for N×K (column-major view of K×N row-major)
-    // stride[0] = 1 element (implicit), stride[1] = N elements
-    uint64_t gmem_prob_stride[5] = {
-        sizeof(__half),           // stride[0] = 1 element
-        sizeof(__half) * total_N, // stride[1] = N elements (next K block)
-        0, 0, 0
-    };
-    // smem_box_shape: [BN, BK] for loading N×K block
-    uint32_t smem_box_shape[5] = {
-        uint32_t(BlockMajorSize),  // BN
-        uint32_t(BlockMinorSize),  // BK
-        1, 1, 1
-    };
-    uint32_t smem_box_stride[5] = {1, 1, 1, 1, 1};
-
-    CUresult result = cuTensorMapEncodeTiled(
-        tma_map, CU_TENSOR_MAP_DATA_TYPE_FLOAT16, 2, gmem_address, gmem_prob_shape,
-        gmem_prob_stride + 1, smem_box_shape, smem_box_stride,
-        CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
-        CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
-
-    if (result != CUDA_SUCCESS) {
-        fprintf(stderr, "ERROR: cuTensorMapEncodeTiled failed with error %d\n", result);
-    }
-}
+// template <int BlockMajorSize, int BlockMinorSize>
+// void create_tensor_map_v2_rr_b(CUtensorMap *tma_map, __half* gmem_ptr,
+//                                int total_N, int total_K) {
+//     void* gmem_address = (void*)gmem_ptr;
+//     // For RR mode B: global memory is K×N (row-major), but we view it as N×K (column-major)
+//     // B[n, k] = B_ptr[n + k * N] = B_ptr[k * N + n] (row-major K×N element access)
+//     // gmem_prob_shape should be [N, K]
+//     uint64_t gmem_prob_shape[5] = {
+//         (uint64_t)total_N,  // N dimension (first dim, stride = 1)
+//         (uint64_t)total_K,  // K dimension (second dim, stride = N)
+//         1, 1, 1
+//     };
+//     // gmem_prob_stride for N×K (column-major view of K×N row-major)
+//     // stride[0] = 1 element (implicit), stride[1] = N elements
+//     uint64_t gmem_prob_stride[5] = {
+//         sizeof(__half),           // stride[0] = 1 element
+//         sizeof(__half) * total_N, // stride[1] = N elements (next K block)
+//         0, 0, 0
+//     };
+//     // smem_box_shape: [BN, BK] for loading N×K block
+//     uint32_t smem_box_shape[5] = {
+//         uint32_t(BlockMajorSize),  // BN
+//         uint32_t(BlockMinorSize),  // BK
+//         1, 1, 1
+//     };
+//     uint32_t smem_box_stride[5] = {1, 1, 1, 1, 1};
+// 
+//     CUresult result = cuTensorMapEncodeTiled(
+//         tma_map, CU_TENSOR_MAP_DATA_TYPE_FLOAT16, 2, gmem_address, gmem_prob_shape,
+//         gmem_prob_stride + 1, smem_box_shape, smem_box_stride,
+//         CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
+//         CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+// 
+//     if (result != CUDA_SUCCESS) {
+//         fprintf(stderr, "ERROR: cuTensorMapEncodeTiled failed with error %d\n", result);
+//     }
+// }
 
 template<int BlockMajorSize, int BlockMinorSize>
 static inline CUtensorMap* allocate_and_create_tensor_map_v2(
@@ -293,22 +290,22 @@ static inline CUtensorMap* allocate_and_create_tensor_map_v2(
     return tma_map_d;
 }
 
-template<int BlockMajorSize, int BlockMinorSize>
-static inline CUtensorMap* allocate_and_create_tensor_map_v2_rr_b(
-    __half* src, int total_N, int total_K) {
-    CUtensorMap *tma_map_d;
-    cudaMalloc(&tma_map_d, sizeof(CUtensorMap));
-    CUtensorMap tma_map_host;
-    create_tensor_map_v2_rr_b<BlockMajorSize, BlockMinorSize>(
-        &tma_map_host, src, total_N, total_K);
-    cudaMemcpy(tma_map_d, &tma_map_host, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
-    return tma_map_d;
-}
+// template<int BlockMajorSize, int BlockMinorSize>
+// static inline CUtensorMap* allocate_and_create_tensor_map_v2_rr_b(
+//     __half* src, int total_N, int total_K) {
+//     CUtensorMap *tma_map_d;
+//     cudaMalloc(&tma_map_d, sizeof(CUtensorMap));
+//     CUtensorMap tma_map_host;
+//     create_tensor_map_v2_rr_b<BlockMajorSize, BlockMinorSize>(
+//         &tma_map_host, src, total_N, total_K);
+//     cudaMemcpy(tma_map_d, &tma_map_host, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
+//     return tma_map_d;
+// }
 
 // Kernel configuration
 constexpr int V2_BM = 64;
 constexpr int V2_BN = 64;
-constexpr int V2_BK = 64;
+constexpr int V2_BK = 16;
 constexpr int V2_WGMMA_M = 64;
 constexpr int V2_WGMMA_N = 64;
 constexpr int V2_WGMMA_K = 16;
@@ -327,8 +324,8 @@ gemm_v2_wgmma_tma_kernel_kk(int M, int N, int K, __half* C,
     __shared__ alignas(128) __half sB[V2_BK * V2_BN];
 
     // Accumulator: 64x64 output = 4 x 8 floats per thread (128 threads)
-    float d[V2_WGMMA_N / 16][8];
-    static_assert(sizeof(d) * 128 == V2_BM * V2_BN * sizeof(float));
+    float d[V2_BM/V2_WGMMA_M][V2_BN/V2_WGMMA_N][V2_WGMMA_N / 16][8];
+    // static_assert(sizeof(d) * 128 == V2_BM * V2_BN * sizeof(float));
     memset(d, 0, sizeof(d));
 
     const int num_blocks_k = K / V2_BK;
@@ -377,10 +374,18 @@ gemm_v2_wgmma_tma_kernel_kk(int M, int N, int K, __half* C,
 
         // WGMMA Compute: 4 iterations of K=16 each (total BK=64)
         warpgroup_arrive_v2();
-        wgmma64_fp16<1, 1, 1, 0, 0>(d, &sA[0], &sB[0]);
-        wgmma64_fp16<1, 1, 1, 0, 0>(d, &sA[V2_WGMMA_K], &sB[V2_WGMMA_K]);
-        wgmma64_fp16<1, 1, 1, 0, 0>(d, &sA[2 * V2_WGMMA_K], &sB[2 * V2_WGMMA_K]);
-        wgmma64_fp16<1, 1, 1, 0, 0>(d, &sA[3 * V2_WGMMA_K], &sB[3 * V2_WGMMA_K]);
+        for (int m_iter = 0; m_iter < V2_BM / V2_WGMMA_M; ++m_iter) {
+          for (int n_iter = 0; n_iter < V2_BN / V2_WGMMA_N; ++n_iter) {
+            wgmma64_fp16<1, 1, 1, 0, 0>(d[m_iter][n_iter], &sA[m_iter * V2_WGMMA_M * V2_BK + 0], &sB[n_iter * V2_WGMMA_N * V2_BK + 0]);
+            // wgmma64_fp16<1, 1, 1, 0, 0>(d[m_iter][n_iter], &sA[m_iter * V2_WGMMA_M * V2_BK + V2_WGMMA_K], &sB[n_iter * V2_WGMMA_N * V2_BK + V2_WGMMA_K]);
+          }
+        }
+        // wgmma64_fp16<1, 1, 1, 0, 0>(d, &sA[2 * V2_WGMMA_K], &sB[2 * V2_WGMMA_K]);
+        // wgmma64_fp16<1, 1, 1, 0, 0>(d, &sA[3 * V2_WGMMA_K], &sB[3 * V2_WGMMA_K]);
+        // wgmma64_fp16<1, 1, 1, 0, 0>(d, &sA[4 * V2_WGMMA_K], &sB[4 * V2_WGMMA_K]);
+        // wgmma64_fp16<1, 1, 1, 0, 0>(d, &sA[5 * V2_WGMMA_K], &sB[5 * V2_WGMMA_K]);
+        // wgmma64_fp16<1, 1, 1, 0, 0>(d, &sA[6 * V2_WGMMA_K], &sB[6 * V2_WGMMA_K]);
+        // wgmma64_fp16<1, 1, 1, 0, 0>(d, &sA[7 * V2_WGMMA_K], &sB[7 * V2_WGMMA_K]);
         warpgroup_commit_batch_v2();
         warpgroup_wait_v2<0>();
     }
@@ -407,14 +412,14 @@ gemm_v2_wgmma_tma_kernel_kk(int M, int N, int K, __half* C,
                     int col = 16 * w + 2 * (tid % 4);
                     #define IDX(i, j) ((j + n_it * V2_WGMMA_N) * M + ((i) + m_it * V2_WGMMA_M))
 
-                    block_C[IDX(row, col)] = __float2half(d[w][0]);
-                    block_C[IDX(row, col + 1)] = __float2half(d[w][1]);
-                    block_C[IDX(row + 8, col)] = __float2half(d[w][2]);
-                    block_C[IDX(row + 8, col + 1)] = __float2half(d[w][3]);
-                    block_C[IDX(row, col + 8)] = __float2half(d[w][4]);
-                    block_C[IDX(row, col + 9)] = __float2half(d[w][5]);
-                    block_C[IDX(row + 8, col + 8)] = __float2half(d[w][6]);
-                    block_C[IDX(row + 8, col + 9)] = __float2half(d[w][7]);
+                    block_C[IDX(row, col)] = __float2half(d[m_it][n_it][w][0]);
+                    block_C[IDX(row, col + 1)] = __float2half(d[m_it][n_it][w][1]);
+                    block_C[IDX(row + 8, col)] = __float2half(d[m_it][n_it][w][2]);
+                    block_C[IDX(row + 8, col + 1)] = __float2half(d[m_it][n_it][w][3]);
+                    block_C[IDX(row, col + 8)] = __float2half(d[m_it][n_it][w][4]);
+                    block_C[IDX(row, col + 9)] = __float2half(d[m_it][n_it][w][5]);
+                    block_C[IDX(row + 8, col + 8)] = __float2half(d[m_it][n_it][w][6]);
+                    block_C[IDX(row + 8, col + 9)] = __float2half(d[m_it][n_it][w][7]);
 
                     #undef IDX
                 }
@@ -435,7 +440,7 @@ gemm_v2_wgmma_tma_kernel_kmn(int M, int N, int K, __half* C,
 
     // Accumulator: 64x64 output = 4 x 8 floats per thread (128 threads)
     float d[V2_WGMMA_N / 16][8];
-    static_assert(sizeof(d) * 128 == V2_BM * V2_BN * sizeof(float));
+    // static_assert(sizeof(d) * 128 == V2_BM * V2_BN * sizeof(float));
     memset(d, 0, sizeof(d));
 
     const int num_blocks_k = K / V2_BK;
@@ -467,14 +472,14 @@ gemm_v2_wgmma_tma_kernel_kmn(int M, int N, int K, __half* C,
     for (int block_k_iter = 0; block_k_iter < num_blocks_k; ++block_k_iter) {
         // TMA Load A and B tiles
         if (threadIdx.x == 0) {
-            // Debug output for first block
-            if (blockIdx.x == 0 && block_k_iter == 0) {
-                printf("RR mode: M=%d, N=%d, K=%d\n", M, N, K);
-                printf("  num_block_m=%d, num_block_n=%d, block_k_iter=%d\n",
-                       num_block_m, num_block_n, block_k_iter);
-                printf("  A TMA coords: (%d, %d)\n", block_k_iter * V2_BK, num_block_m * V2_BM);
-                printf("  B TMA coords: (%d, %d)\n", num_block_n * V2_BN, block_k_iter * V2_BK);
-            }
+            // // Debug output for first block
+            // if (blockIdx.x == 0 && block_k_iter == 0) {
+            //     printf("RR mode: M=%d, N=%d, K=%d\n", M, N, K);
+            //     printf("  num_block_m=%d, num_block_n=%d, block_k_iter=%d\n",
+            //            num_block_m, num_block_n, block_k_iter);
+            //     printf("  A TMA coords: (%d, %d)\n", block_k_iter * V2_BK, num_block_m * V2_BM);
+            //     printf("  B TMA coords: (%d, %d)\n", num_block_n * V2_BN, block_k_iter * V2_BK);
+            // }
 
             // A: M×K layout (row-major), load block at (k, m) in element coordinates
             cde::cp_async_bulk_tensor_2d_global_to_shared(
@@ -580,12 +585,12 @@ void gemm_v2_wgmma_tma_fp16(const __half* A, const __half* B, __half* C,
                 const_cast<__half*>(A), M / V2_BM, K / V2_BK);
             v2_tma_map_B = allocate_and_create_tensor_map_v2<V2_BN, V2_BK>(
                 const_cast<__half*>(B), N / V2_BN, K / V2_BK);
-        } else if (lhs_format == 'R' && rhs_format == 'R') {
-            v2_tma_map_A = allocate_and_create_tensor_map_v2<V2_BM, V2_BK>(
-                const_cast<__half*>(A), M / V2_BM, K / V2_BK);
-            // For RR mode: B is viewed as N×K (column-major), TMA map with total_N and total_K
-            v2_tma_map_B = allocate_and_create_tensor_map_v2_rr_b<V2_BN, V2_BK>(
-                const_cast<__half*>(B), N, K);
+        // } else if (lhs_format == 'R' && rhs_format == 'R') {
+        //     v2_tma_map_A = allocate_and_create_tensor_map_v2<V2_BM, V2_BK>(
+        //         const_cast<__half*>(A), M / V2_BM, K / V2_BK);
+        //     // For RR mode: B is viewed as N×K (column-major), TMA map with total_N and total_K
+        //     v2_tma_map_B = allocate_and_create_tensor_map_v2_rr_b<V2_BN, V2_BK>(
+        //         const_cast<__half*>(B), N, K);
         }
 
         v2_prev_m = M;

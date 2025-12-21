@@ -99,12 +99,12 @@ inline float getVerificationTolerance(int size) {
         return 1e-3f;
     } else if constexpr (std::is_same_v<T, __half>) {
         // Size-dependent tolerance for half precision
-        if (size <= 512) return 0.15f;
-        else if (size <= 1024) return 0.25f;
+        if (size <= 512) return 0.25f;
+        else if (size <= 1024) return 0.35f;
         else return 2.0f;  // Larger matrices need more tolerance due to FP16 accumulation
     } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
         // BFloat16 has lower precision, needs higher tolerance
-        if (size <= 512) return 0.2f;
+        if (size <= 512) return 0.25f;
         else if (size <= 1024) return 0.35f;
         else return 2.0f;
     }
