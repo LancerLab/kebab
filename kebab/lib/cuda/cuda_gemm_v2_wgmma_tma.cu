@@ -35,6 +35,69 @@ namespace baseline {
 namespace cde = cuda::device::experimental;
 using barrier = cuda::barrier<cuda::thread_scope_block>;
 
+// --------------- WGMMA primitives (SM90+) ---------------
+// refer to:
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#asynchronous-warpgroup-level-leading-dimension-byte-offset
+// 9.7.15.5.1.2.2. Matrix Descriptor Format
+// SWIZZLE pattern enum
+enum class WGMMA_Swizzle : uint64_t {
+  NS = 0,  // No swizzle
+  B32 = 3, // 32B swizzle
+  B64 = 2, // 64B swizzle
+  B128 = 1 // 128B swizzle
+};
+
+// Major order enum
+enum class WGMMA_MajorOrder {
+  K_MAJOR, // K dimension is major (leading)
+  MN_MAJOR // M and N dimensions are major (leading)
+};
+
+__device__ static inline uint64_t matrix_descriptor_encode(uint64_t x) {
+    return (((x) & 0x3FFFF) >> 0x4);
+}
+
+template <WGMMA_MajorOrder MajorOrder, WGMMA_Swizzle Swizzle, typename T>
+__device__ static inline uint64_t make_smem_desc(T* ptr) {
+  uint32_t addr = static_cast<uint32_t>(__cvta_generic_to_shared(ptr));
+  uint64_t desc = 0x0000000000000000;
+  desc |= matrix_descriptor_encode(addr);
+
+  // Determine stride and leading dimension based on major order and swizzle
+  uint64_t stride_bytes = 0;
+  uint64_t leading_dim = 0;
+
+  if constexpr (MajorOrder == WGMMA_MajorOrder::K_MAJOR) {
+    // K-major layout: stride varies by swizzle pattern
+    switch (Swizzle) {
+    case WGMMA_Swizzle::NS:
+      stride_bytes = 128;
+      leading_dim = 64;
+      break;
+    case WGMMA_Swizzle::B32:
+      stride_bytes = 16;
+      leading_dim = 256;
+      break;
+    case WGMMA_Swizzle::B64:
+      stride_bytes = 16;
+      leading_dim = 512;
+      break;
+    case WGMMA_Swizzle::B128:
+      stride_bytes = 16;
+      leading_dim = 1024;
+      break;
+    }
+  }
+  // TODO: MN-major not handled
+  
+  desc |= matrix_descriptor_encode(stride_bytes) << 16;
+  desc |= matrix_descriptor_encode(leading_dim) << 32;
+  desc |= static_cast<uint64_t>(Swizzle) << 62;
+
+  return desc;
+
+}
+
 // WGMMA fence/sync primitives
 __device__ void warpgroup_arrive_v2() {
     asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory");
@@ -134,8 +197,8 @@ template<int ScaleD, int ScaleA, int ScaleB, int TransA, int TransB>
 __device__ void wgmma64_fp16(float d[4][8], __half* sA, __half* sB) {
     if constexpr (TransB == 0) {
         // RC mode: both A and B use MN-major layout
-        uint64_t desc_a = make_smem_desc_k(&sA[0]);
-        uint64_t desc_b = make_smem_desc_k(&sB[0]);
+        uint64_t desc_a = make_smem_desc<WGMMA_MajorOrder::K_MAJOR, WGMMA_Swizzle::B32, __half>(&sA[0]);
+        uint64_t desc_b = make_smem_desc<WGMMA_MajorOrder::K_MAJOR, WGMMA_Swizzle::B32, __half>(&sB[0]);
         asm volatile(
             "{\n"
             "wgmma.mma_async.sync.aligned.m64n64k16.f32.f16.f16 "
@@ -237,47 +300,6 @@ void create_tensor_map_v2(CUtensorMap *tma_map, __half* gmem_ptr,
     }
 }
 
-// Special TMA map creation for RR mode B matrix (K×N in global memory, viewed as N×K)
-// BlockMajorSize = BN (N dimension), BlockMinorSize = BK (K dimension)
-// total_N = N, total_K = K
-// template <int BlockMajorSize, int BlockMinorSize>
-// void create_tensor_map_v2_rr_b(CUtensorMap *tma_map, __half* gmem_ptr,
-//                                int total_N, int total_K) {
-//     void* gmem_address = (void*)gmem_ptr;
-//     // For RR mode B: global memory is K×N (row-major), but we view it as N×K (column-major)
-//     // B[n, k] = B_ptr[n + k * N] = B_ptr[k * N + n] (row-major K×N element access)
-//     // gmem_prob_shape should be [N, K]
-//     uint64_t gmem_prob_shape[5] = {
-//         (uint64_t)total_N,  // N dimension (first dim, stride = 1)
-//         (uint64_t)total_K,  // K dimension (second dim, stride = N)
-//         1, 1, 1
-//     };
-//     // gmem_prob_stride for N×K (column-major view of K×N row-major)
-//     // stride[0] = 1 element (implicit), stride[1] = N elements
-//     uint64_t gmem_prob_stride[5] = {
-//         sizeof(__half),           // stride[0] = 1 element
-//         sizeof(__half) * total_N, // stride[1] = N elements (next K block)
-//         0, 0, 0
-//     };
-//     // smem_box_shape: [BN, BK] for loading N×K block
-//     uint32_t smem_box_shape[5] = {
-//         uint32_t(BlockMajorSize),  // BN
-//         uint32_t(BlockMinorSize),  // BK
-//         1, 1, 1
-//     };
-//     uint32_t smem_box_stride[5] = {1, 1, 1, 1, 1};
-// 
-//     CUresult result = cuTensorMapEncodeTiled(
-//         tma_map, CU_TENSOR_MAP_DATA_TYPE_FLOAT16, 2, gmem_address, gmem_prob_shape,
-//         gmem_prob_stride + 1, smem_box_shape, smem_box_stride,
-//         CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
-//         CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
-// 
-//     if (result != CUDA_SUCCESS) {
-//         fprintf(stderr, "ERROR: cuTensorMapEncodeTiled failed with error %d\n", result);
-//     }
-// }
-
 template<int BlockMajorSize, int BlockMinorSize>
 static inline CUtensorMap* allocate_and_create_tensor_map_v2(
     __half* src, int blocks_height, int blocks_width) {
@@ -289,18 +311,6 @@ static inline CUtensorMap* allocate_and_create_tensor_map_v2(
     cudaMemcpy(tma_map_d, &tma_map_host, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
     return tma_map_d;
 }
-
-// template<int BlockMajorSize, int BlockMinorSize>
-// static inline CUtensorMap* allocate_and_create_tensor_map_v2_rr_b(
-//     __half* src, int total_N, int total_K) {
-//     CUtensorMap *tma_map_d;
-//     cudaMalloc(&tma_map_d, sizeof(CUtensorMap));
-//     CUtensorMap tma_map_host;
-//     create_tensor_map_v2_rr_b<BlockMajorSize, BlockMinorSize>(
-//         &tma_map_host, src, total_N, total_K);
-//     cudaMemcpy(tma_map_d, &tma_map_host, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
-//     return tma_map_d;
-// }
 
 // Kernel configuration
 constexpr int V2_BM = 64;
@@ -315,240 +325,125 @@ constexpr int V2_NUM_THREADS = 128;
 // WGMMA+TMA Kernel
 // ============================================================================
 
+template<WGMMA_MajorOrder MajorOrderA, WGMMA_MajorOrder MajorOrderB>
 __global__ void __launch_bounds__(V2_NUM_THREADS)
-gemm_v2_wgmma_tma_kernel_kk(int M, int N, int K, __half* C,
+gemm_v2_wgmma_tma_kernel(int M, int N, int K, __half* C,
                           const CUtensorMap* tensorMapA,
                           const CUtensorMap* tensorMapB) {
-    // Shared memory for A and B tiles
-    __shared__ alignas(128) __half sA[V2_BM * V2_BK];
-    __shared__ alignas(128) __half sB[V2_BK * V2_BN];
+    if constexpr (MajorOrderA == WGMMA_MajorOrder::K_MAJOR && MajorOrderB == WGMMA_MajorOrder::K_MAJOR) {
+        // Shared memory for A and B tiles
+        __shared__ alignas(128) __half sA[V2_BM * V2_BK];
+        __shared__ alignas(128) __half sB[V2_BK * V2_BN];
 
-    // Accumulator: 64x64 output = 4 x 8 floats per thread (128 threads)
-    float d[V2_BM/V2_WGMMA_M][V2_BN/V2_WGMMA_N][V2_WGMMA_N / 16][8];
-    // static_assert(sizeof(d) * 128 == V2_BM * V2_BN * sizeof(float));
-    memset(d, 0, sizeof(d));
+        // Accumulator: 64x64 output = 4 x 8 floats per thread (128 threads)
+        float d[V2_BM/V2_WGMMA_M][V2_BN/V2_WGMMA_N][V2_WGMMA_N / 16][8];
+        // static_assert(sizeof(d) * 128 == V2_BM * V2_BN * sizeof(float));
+        memset(d, 0, sizeof(d));
 
-    const int num_blocks_k = K / V2_BK;
-    int num_block_n = blockIdx.x % (N / V2_BN);
-    int num_block_m = blockIdx.x / (N / V2_BN);
+        const int num_blocks_k = K / V2_BK;
+        int num_block_n = blockIdx.x % (N / V2_BN);
+        int num_block_m = blockIdx.x / (N / V2_BN);
 
-    // Initialize barriers
-    #pragma nv_diag_suppress static_var_with_dynamic_init
+        // Initialize barriers
+        #pragma nv_diag_suppress static_var_with_dynamic_init
 
-    // TMA barriers
-    __shared__ barrier barA;
-    __shared__ barrier barB;
+        // TMA barriers
+        __shared__ barrier barA;
+        __shared__ barrier barB;
 
-    if (threadIdx.x == 0) {
-        init(&barA, blockDim.x);
-        init(&barB, blockDim.x);
-        cde::fence_proxy_async_shared_cta();
-    }
-    __syncthreads();
-    // TMA barriers end
-
-    barrier::arrival_token tokenA, tokenB;
-
-    // Main K-loop
-    // iterate over K dim, each time, one warpgroup load a tile of A and B from global to shared mem
-    // A is 64x64 tile, B is 64x64 tile
-    // then perform 4 unrolled WGMMA operation, each time, one warpgroup compute a 64x64 tile of C
-    // NOTE: here we send different offset to wgmma, is equivalent to cute way without calculate offset
-    for (int block_k_iter = 0; block_k_iter < num_blocks_k; ++block_k_iter) {
-        // TMA Load A and B tiles
         if (threadIdx.x == 0) {
-            cde::cp_async_bulk_tensor_2d_global_to_shared(
-                &sA[0], tensorMapA, block_k_iter * V2_BK, num_block_m * V2_BM, barA);
-            tokenA = cuda::device::barrier_arrive_tx(barA, 1, sizeof(sA));
-
-            cde::cp_async_bulk_tensor_2d_global_to_shared(
-                &sB[0], tensorMapB, block_k_iter * V2_BK, num_block_n * V2_BN, barB);
-            tokenB = cuda::device::barrier_arrive_tx(barB, 1, sizeof(sB));
-        } else {
-            tokenA = barA.arrive();
-            tokenB = barB.arrive();
+            init(&barA, blockDim.x);
+            init(&barB, blockDim.x);
+            cde::fence_proxy_async_shared_cta();
         }
-        barA.wait(std::move(tokenA));
-        barB.wait(std::move(tokenB));
         __syncthreads();
+        // TMA barriers end
 
-        // WGMMA Compute: 4 iterations of K=16 each (total BK=64)
-        warpgroup_arrive_v2();
-        for (int m_iter = 0; m_iter < V2_BM / V2_WGMMA_M; ++m_iter) {
-          for (int n_iter = 0; n_iter < V2_BN / V2_WGMMA_N; ++n_iter) {
-            wgmma64_fp16<1, 1, 1, 0, 0>(d[m_iter][n_iter], &sA[m_iter * V2_WGMMA_M * V2_BK + 0], &sB[n_iter * V2_WGMMA_N * V2_BK + 0]);
-            // wgmma64_fp16<1, 1, 1, 0, 0>(d[m_iter][n_iter], &sA[m_iter * V2_WGMMA_M * V2_BK + V2_WGMMA_K], &sB[n_iter * V2_WGMMA_N * V2_BK + V2_WGMMA_K]);
-          }
+        barrier::arrival_token tokenA, tokenB;
+
+        // Main K-loop
+        // iterate over K dim, each time, one warpgroup load a tile of A and B from global to shared mem
+        // A is 64x64 tile, B is 64x64 tile
+        // then perform 4 unrolled WGMMA operation, each time, one warpgroup compute a 64x64 tile of C
+        // NOTE: here we send different offset to wgmma, is equivalent to cute way without calculate offset
+        for (int block_k_iter = 0; block_k_iter < num_blocks_k; ++block_k_iter) {
+            // TMA Load A and B tiles
+            if (threadIdx.x == 0) {
+                cde::cp_async_bulk_tensor_2d_global_to_shared(
+                    &sA[0], tensorMapA, block_k_iter * V2_BK, num_block_m * V2_BM, barA);
+                tokenA = cuda::device::barrier_arrive_tx(barA, 1, sizeof(sA));
+
+                cde::cp_async_bulk_tensor_2d_global_to_shared(
+                    &sB[0], tensorMapB, block_k_iter * V2_BK, num_block_n * V2_BN, barB);
+                tokenB = cuda::device::barrier_arrive_tx(barB, 1, sizeof(sB));
+            } else {
+                tokenA = barA.arrive();
+                tokenB = barB.arrive();
+            }
+            barA.wait(std::move(tokenA));
+            barB.wait(std::move(tokenB));
+            __syncthreads();
+
+            // WGMMA Compute: 4 iterations of K=16 each (total BK=64)
+            warpgroup_arrive_v2();
+            for (int m_iter = 0; m_iter < V2_BM / V2_WGMMA_M; ++m_iter) {
+            for (int n_iter = 0; n_iter < V2_BN / V2_WGMMA_N; ++n_iter) {
+                wgmma64_fp16<1, 1, 1, 0, 0>(d[m_iter][n_iter], &sA[m_iter * V2_WGMMA_M * V2_BK + 0], &sB[n_iter * V2_WGMMA_N * V2_BK + 0]);
+                // wgmma64_fp16<1, 1, 1, 0, 0>(d[m_iter][n_iter], &sA[m_iter * V2_WGMMA_M * V2_BK + V2_WGMMA_K], &sB[n_iter * V2_WGMMA_N * V2_BK + V2_WGMMA_K]);
+            }
+            }
+            // wgmma64_fp16<1, 1, 1, 0, 0>(d, &sA[2 * V2_WGMMA_K], &sB[2 * V2_WGMMA_K]);
+            // wgmma64_fp16<1, 1, 1, 0, 0>(d, &sA[3 * V2_WGMMA_K], &sB[3 * V2_WGMMA_K]);
+            // wgmma64_fp16<1, 1, 1, 0, 0>(d, &sA[4 * V2_WGMMA_K], &sB[4 * V2_WGMMA_K]);
+            // wgmma64_fp16<1, 1, 1, 0, 0>(d, &sA[5 * V2_WGMMA_K], &sB[5 * V2_WGMMA_K]);
+            // wgmma64_fp16<1, 1, 1, 0, 0>(d, &sA[6 * V2_WGMMA_K], &sB[6 * V2_WGMMA_K]);
+            // wgmma64_fp16<1, 1, 1, 0, 0>(d, &sA[7 * V2_WGMMA_K], &sB[7 * V2_WGMMA_K]);
+            warpgroup_commit_batch_v2();
+            warpgroup_wait_v2<0>();
         }
-        // wgmma64_fp16<1, 1, 1, 0, 0>(d, &sA[2 * V2_WGMMA_K], &sB[2 * V2_WGMMA_K]);
-        // wgmma64_fp16<1, 1, 1, 0, 0>(d, &sA[3 * V2_WGMMA_K], &sB[3 * V2_WGMMA_K]);
-        // wgmma64_fp16<1, 1, 1, 0, 0>(d, &sA[4 * V2_WGMMA_K], &sB[4 * V2_WGMMA_K]);
-        // wgmma64_fp16<1, 1, 1, 0, 0>(d, &sA[5 * V2_WGMMA_K], &sB[5 * V2_WGMMA_K]);
-        // wgmma64_fp16<1, 1, 1, 0, 0>(d, &sA[6 * V2_WGMMA_K], &sB[6 * V2_WGMMA_K]);
-        // wgmma64_fp16<1, 1, 1, 0, 0>(d, &sA[7 * V2_WGMMA_K], &sB[7 * V2_WGMMA_K]);
-        warpgroup_commit_batch_v2();
-        warpgroup_wait_v2<0>();
-    }
 
-    // Store results to global memory (column-major C)
-    // lane: 0-31, warp: 0-3
-    // each warp handles 16 rows, thus row_base = warp * 16
-    // every 4 lane (0-3) handles same row, row_base + lane / 4
-    // each 4 lane team, handles 2 rows, (row, ...) and (row+8, ...)
-    // this is easy to calcute: 32threads together handle 16rows, 4 threads per row, need 2 iterations
-    // colwise:
-    // group per 16 col, iterates 4 times, w = 0-3, col_base = w * 16, each time 4 lane handles 2 col
-    // tid 0-3 handles 1 row 16 col, each handle (row, col), (row, col+1), (row, col+8), (row, col+9)
-    {
-        int tid = threadIdx.x;
-        int lane = tid % 32;
-        int warp = tid / 32;
-        uint32_t row = warp * 16 + lane / 4;
-        __half *block_C = C + num_block_n * V2_BN * M + num_block_m * V2_BM;
+        // Store results to global memory (column-major C)
+        // lane: 0-31, warp: 0-3
+        // each warp handles 16 rows, thus row_base = warp * 16
+        // every 4 lane (0-3) handles same row, row_base + lane / 4
+        // each 4 lane team, handles 2 rows, (row, ...) and (row+8, ...)
+        // this is easy to calcute: 32threads together handle 16rows, 4 threads per row, need 2 iterations
+        // colwise:
+        // group per 16 col, iterates 4 times, w = 0-3, col_base = w * 16, each time 4 lane handles 2 col
+        // tid 0-3 handles 1 row 16 col, each handle (row, col), (row, col+1), (row, col+8), (row, col+9)
+        {
+            int tid = threadIdx.x;
+            int lane = tid % 32;
+            int warp = tid / 32;
+            uint32_t row = warp * 16 + lane / 4;
+            __half *block_C = C + num_block_n * V2_BN * M + num_block_m * V2_BM;
 
-        for (int m_it = 0; m_it < V2_BM / V2_WGMMA_M; ++m_it) {
-            for (int n_it = 0; n_it < V2_BN / V2_WGMMA_N; ++n_it) {
-                for (int w = 0; w < V2_WGMMA_N / 16; ++w) {
-                    int col = 16 * w + 2 * (tid % 4);
-                    #define IDX(i, j) ((j + n_it * V2_WGMMA_N) * M + ((i) + m_it * V2_WGMMA_M))
+            for (int m_it = 0; m_it < V2_BM / V2_WGMMA_M; ++m_it) {
+                for (int n_it = 0; n_it < V2_BN / V2_WGMMA_N; ++n_it) {
+                    for (int w = 0; w < V2_WGMMA_N / 16; ++w) {
+                        int col = 16 * w + 2 * (tid % 4);
+                        #define IDX(i, j) ((j + n_it * V2_WGMMA_N) * M + ((i) + m_it * V2_WGMMA_M))
 
-                    block_C[IDX(row, col)] = __float2half(d[m_it][n_it][w][0]);
-                    block_C[IDX(row, col + 1)] = __float2half(d[m_it][n_it][w][1]);
-                    block_C[IDX(row + 8, col)] = __float2half(d[m_it][n_it][w][2]);
-                    block_C[IDX(row + 8, col + 1)] = __float2half(d[m_it][n_it][w][3]);
-                    block_C[IDX(row, col + 8)] = __float2half(d[m_it][n_it][w][4]);
-                    block_C[IDX(row, col + 9)] = __float2half(d[m_it][n_it][w][5]);
-                    block_C[IDX(row + 8, col + 8)] = __float2half(d[m_it][n_it][w][6]);
-                    block_C[IDX(row + 8, col + 9)] = __float2half(d[m_it][n_it][w][7]);
+                        block_C[IDX(row, col)] = __float2half(d[m_it][n_it][w][0]);
+                        block_C[IDX(row, col + 1)] = __float2half(d[m_it][n_it][w][1]);
+                        block_C[IDX(row + 8, col)] = __float2half(d[m_it][n_it][w][2]);
+                        block_C[IDX(row + 8, col + 1)] = __float2half(d[m_it][n_it][w][3]);
+                        block_C[IDX(row, col + 8)] = __float2half(d[m_it][n_it][w][4]);
+                        block_C[IDX(row, col + 9)] = __float2half(d[m_it][n_it][w][5]);
+                        block_C[IDX(row + 8, col + 8)] = __float2half(d[m_it][n_it][w][6]);
+                        block_C[IDX(row + 8, col + 9)] = __float2half(d[m_it][n_it][w][7]);
 
-                    #undef IDX
+                        #undef IDX
+                    }
                 }
             }
         }
+    } else {
+        // Not implemented
+        assert(false);
     }
 }
 
-__global__ void __launch_bounds__(V2_NUM_THREADS)
-gemm_v2_wgmma_tma_kernel_kmn(int M, int N, int K, __half* C,
-                          const CUtensorMap* tensorMapA,
-                          const CUtensorMap* tensorMapB) {
-    // Shared memory for A and B tiles
-    // A: M×K layout (MN-major), size = BM * BK
-    // B: N×K layout (K-major), size = BN * BK
-    __shared__ alignas(128) __half sA[V2_BM * V2_BK];
-    __shared__ alignas(128) __half sB[V2_BN * V2_BK];
-
-    // Accumulator: 64x64 output = 4 x 8 floats per thread (128 threads)
-    float d[V2_WGMMA_N / 16][8];
-    // static_assert(sizeof(d) * 128 == V2_BM * V2_BN * sizeof(float));
-    memset(d, 0, sizeof(d));
-
-    const int num_blocks_k = K / V2_BK;
-    int num_block_n = blockIdx.x % (N / V2_BN);
-    int num_block_m = blockIdx.x / (N / V2_BN);
-
-    // Initialize barriers
-    #pragma nv_diag_suppress static_var_with_dynamic_init
-
-    // TMA barriers
-    __shared__ barrier barA;
-    __shared__ barrier barB;
-
-    if (threadIdx.x == 0) {
-        init(&barA, blockDim.x);
-        init(&barB, blockDim.x);
-        cde::fence_proxy_async_shared_cta();
-    }
-    __syncthreads();
-    // TMA barriers end
-
-    barrier::arrival_token tokenA, tokenB;
-
-    // Main K-loop
-    // iterate over K dim, each time, one warpgroup load a tile of A and B from global to shared mem
-    // A is 64x64 tile, B is 64x64 tile
-    // then perform 4 unrolled WGMMA operation, each time, one warpgroup compute a 64x64 tile of C
-    // NOTE: here we send different offset to wgmma, is equivalent to cute way without calculate offset
-    for (int block_k_iter = 0; block_k_iter < num_blocks_k; ++block_k_iter) {
-        // TMA Load A and B tiles
-        if (threadIdx.x == 0) {
-            // // Debug output for first block
-            // if (blockIdx.x == 0 && block_k_iter == 0) {
-            //     printf("RR mode: M=%d, N=%d, K=%d\n", M, N, K);
-            //     printf("  num_block_m=%d, num_block_n=%d, block_k_iter=%d\n",
-            //            num_block_m, num_block_n, block_k_iter);
-            //     printf("  A TMA coords: (%d, %d)\n", block_k_iter * V2_BK, num_block_m * V2_BM);
-            //     printf("  B TMA coords: (%d, %d)\n", num_block_n * V2_BN, block_k_iter * V2_BK);
-            // }
-
-            // A: M×K layout (row-major), load block at (k, m) in element coordinates
-            cde::cp_async_bulk_tensor_2d_global_to_shared(
-                &sA[0], tensorMapA, block_k_iter * V2_BK, num_block_m * V2_BM, barA);
-            tokenA = cuda::device::barrier_arrive_tx(barA, 1, sizeof(sA));
-
-            // B: K×N layout (row-major), viewed as N×K (column-major)
-            // TMA map shape is [N, K], load block at (n, k) in element coordinates
-            cde::cp_async_bulk_tensor_2d_global_to_shared(
-                &sB[0], tensorMapB, num_block_n * V2_BN, block_k_iter * V2_BK, barB);
-            tokenB = cuda::device::barrier_arrive_tx(barB, 1, sizeof(sB));
-        } else {
-            tokenA = barA.arrive();
-            tokenB = barB.arrive();
-        }
-        barA.wait(std::move(tokenA));
-        barB.wait(std::move(tokenB));
-        __syncthreads();
-
-        // WGMMA Compute: 4 iterations of K=16 each (total BK=64)
-        // For RR mode: A is K-major (stride in K = 1), B is MN-major (stride in K = V2_BN = 64)
-        // A offset: K=16 FP16 elements (K-major, K is contiguous)
-        // B offset: K=16 FP16 elements * N stride = 16 * 64 = 1024 FP16 elements (MN-major, N is contiguous)
-        warpgroup_arrive_v2();
-        wgmma64_fp16<1, 1, 1, 0, 1>(d, &sA[0], &sB[0]);
-        wgmma64_fp16<1, 1, 1, 0, 1>(d, &sA[V2_WGMMA_K], &sB[V2_WGMMA_K * V2_BN]);
-        wgmma64_fp16<1, 1, 1, 0, 1>(d, &sA[2 * V2_WGMMA_K], &sB[2 * V2_WGMMA_K * V2_BN]);
-        wgmma64_fp16<1, 1, 1, 0, 1>(d, &sA[3 * V2_WGMMA_K], &sB[3 * V2_WGMMA_K * V2_BN]);
-        warpgroup_commit_batch_v2();
-        warpgroup_wait_v2<0>();
-    }
-
-    // Store results to global memory (column-major C)
-    // lane: 0-31, warp: 0-3
-    // each warp handles 16 rows, thus row_base = warp * 16
-    // every 4 lane (0-3) handles same row, row_base + lane / 4
-    // each 4 lane team, handles 2 rows, (row, ...) and (row+8, ...)
-    // this is easy to calcute: 32threads together handle 16rows, 4 threads per row, need 2 iterations
-    // colwise:
-    // group per 16 col, iterates 4 times, w = 0-3, col_base = w * 16, each time 4 lane handles 2 col
-    // tid 0-3 handles 1 row 16 col, each handle (row, col), (row, col+1), (row, col+8), (row, col+9)
-    {
-        int tid = threadIdx.x;
-        int lane = tid % 32;
-        int warp = tid / 32;
-        uint32_t row = warp * 16 + lane / 4;
-        __half *block_C = C + num_block_n * V2_BN * M + num_block_m * V2_BM;
-
-        for (int m_it = 0; m_it < V2_BM / V2_WGMMA_M; ++m_it) {
-            for (int n_it = 0; n_it < V2_BN / V2_WGMMA_N; ++n_it) {
-                for (int w = 0; w < V2_WGMMA_N / 16; ++w) {
-                    int col = 16 * w + 2 * (tid % 4);
-                    #define IDX(i, j) ((j + n_it * V2_WGMMA_N) * M + ((i) + m_it * V2_WGMMA_M))
-
-                    block_C[IDX(row, col)] = __float2half(d[w][0]);
-                    block_C[IDX(row, col + 1)] = __float2half(d[w][1]);
-                    block_C[IDX(row + 8, col)] = __float2half(d[w][2]);
-                    block_C[IDX(row + 8, col + 1)] = __float2half(d[w][3]);
-                    block_C[IDX(row, col + 8)] = __float2half(d[w][4]);
-                    block_C[IDX(row, col + 9)] = __float2half(d[w][5]);
-                    block_C[IDX(row + 8, col + 8)] = __float2half(d[w][6]);
-                    block_C[IDX(row + 8, col + 9)] = __float2half(d[w][7]);
-
-                    #undef IDX
-                }
-            }
-        }
-    }
-}
 
 // ============================================================================
 // Host Function
@@ -585,12 +480,9 @@ void gemm_v2_wgmma_tma_fp16(const __half* A, const __half* B, __half* C,
                 const_cast<__half*>(A), M / V2_BM, K / V2_BK);
             v2_tma_map_B = allocate_and_create_tensor_map_v2<V2_BN, V2_BK>(
                 const_cast<__half*>(B), N / V2_BN, K / V2_BK);
-        // } else if (lhs_format == 'R' && rhs_format == 'R') {
-        //     v2_tma_map_A = allocate_and_create_tensor_map_v2<V2_BM, V2_BK>(
-        //         const_cast<__half*>(A), M / V2_BM, K / V2_BK);
-        //     // For RR mode: B is viewed as N×K (column-major), TMA map with total_N and total_K
-        //     v2_tma_map_B = allocate_and_create_tensor_map_v2_rr_b<V2_BN, V2_BK>(
-        //         const_cast<__half*>(B), N, K);
+        } else if (lhs_format == 'R' && rhs_format == 'R') {
+            v2_tma_map_A = allocate_and_create_tensor_map_v2<V2_BM, V2_BK>(
+                const_cast<__half*>(A), M / V2_BM, K / V2_BK);
         }
 
         v2_prev_m = M;
@@ -600,10 +492,11 @@ void gemm_v2_wgmma_tma_fp16(const __half* A, const __half* B, __half* C,
 
     dim3 grid((M / V2_BM) * (N / V2_BN));
     if (lhs_format == 'R' && rhs_format == 'R') {
-        gemm_v2_wgmma_tma_kernel_kmn<<<grid, V2_NUM_THREADS, 0, stream>>>(
+        // TODO: 
+        gemm_v2_wgmma_tma_kernel<WGMMA_MajorOrder::K_MAJOR, WGMMA_MajorOrder::K_MAJOR><<<grid, V2_NUM_THREADS, 0, stream>>>(
             M, N, K, const_cast<__half*>(C), v2_tma_map_A, v2_tma_map_B);
     } else if (lhs_format == 'R' && rhs_format == 'C') {
-        gemm_v2_wgmma_tma_kernel_kk<<<grid, V2_NUM_THREADS, 0, stream>>>(
+        gemm_v2_wgmma_tma_kernel<WGMMA_MajorOrder::K_MAJOR, WGMMA_MajorOrder::K_MAJOR><<<grid, V2_NUM_THREADS, 0, stream>>>(
             M, N, K, const_cast<__half*>(C), v2_tma_map_A, v2_tma_map_B);
     }
 }
@@ -611,11 +504,6 @@ void gemm_v2_wgmma_tma_fp16(const __half* A, const __half* B, __half* C,
 // ============================================================================
 // BFloat16 Version
 // ============================================================================
-
-// Encode shared memory address for WGMMA descriptor
-__device__ static inline uint64_t matrix_descriptor_encode(uint64_t x) {
-    return (((x) & 0x3FFFF) >> 0x4);
-}
 
 __device__ uint64_t make_smem_desc_v2_bf16(__nv_bfloat16* ptr) {
     uint32_t addr = static_cast<uint32_t>(__cvta_generic_to_shared(ptr));
