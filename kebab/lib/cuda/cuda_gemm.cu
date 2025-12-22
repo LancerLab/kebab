@@ -9,6 +9,7 @@
  */
 
 #include "kebab/cuda/cuda_gemm.h"
+#include "kebab/cuda/cuda_kernel_utils.h"
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 #include <cstdio>
@@ -49,7 +50,9 @@ void gemm(const __half* A, const __half* B, __half* C,
             break;
         case 2:
             // V2: WGMMA + TMA (SM90 Hopper, RC mode only)
-            gemm_v2_wgmma_tma_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            // Uses B128 swizzle for optimal performance (92% of cuBLAS for FP16)
+            gemm_v2_wgmma_tma<cuda_kernel::WGMMA_Swizzle::B128, cuda_kernel::WGMMA_Swizzle::B128, __half>(
+                A, B, C, M, N, K, lhs_format, rhs_format, stream);
             break;
         case 3:
             // V3: Warp Group with larger tiles (SM90 Hopper, RC mode only)
@@ -140,7 +143,10 @@ void gemm(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
             gemm_v1_warptiling_bf16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
             break;
         case 2:
-            gemm_v2_wgmma_tma_bf16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            // V2: WGMMA + TMA (SM90 Hopper, RC mode only)
+            // Uses B128 swizzle for optimal performance (65% of cuBLAS for BF16)
+            gemm_v2_wgmma_tma<cuda_kernel::WGMMA_Swizzle::B128, cuda_kernel::WGMMA_Swizzle::B128, __nv_bfloat16>(
+                A, B, C, M, N, K, lhs_format, rhs_format, stream);
             break;
         case 3:
             gemm_v3_warpgroup_bf16(A, B, C, M, N, K, lhs_format, rhs_format, stream);

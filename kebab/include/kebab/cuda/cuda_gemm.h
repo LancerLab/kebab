@@ -3,6 +3,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
+#include "kebab/cuda/cuda_kernel_utils.h"
 
 namespace baseline {
 
@@ -46,8 +47,15 @@ void gemm_v1_warptiling_fp16(const __half* A, const __half* B, __half* C,
  * A: row-major, B: column-major, C: column-major
  * Uses TMA for efficient global memory loads
  * Uses WGMMA 64x64x16 for Tensor Core computation
+ *
+ * @tparam SwizzleA Swizzle pattern for A matrix (default: B32)
+ * @tparam SwizzleB Swizzle pattern for B matrix (default: B32)
+ * @tparam T Data type (__half or __nv_bfloat16)
  */
-void gemm_v2_wgmma_tma_fp16(const __half* A, const __half* B, __half* C,
+template<cuda_kernel::WGMMA_Swizzle SwizzleA = cuda_kernel::WGMMA_Swizzle::B32,
+         cuda_kernel::WGMMA_Swizzle SwizzleB = cuda_kernel::WGMMA_Swizzle::B32,
+         typename T>
+void gemm_v2_wgmma_tma(const T* A, const T* B, T* C,
                             int M, int N, int K, char lhs_format, char rhs_format,
                             cudaStream_t stream);
 
@@ -142,10 +150,6 @@ void gemm_v12_stmatrix_fp16(const __half* A, const __half* B, __half* C,
 void gemm_v1_warptiling_bf16(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
                               int M, int N, int K, char lhs_format, char rhs_format,
                               cudaStream_t stream);
-
-void gemm_v2_wgmma_tma_bf16(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
-                            int M, int N, int K, char lhs_format, char rhs_format,
-                            cudaStream_t stream);
 
 void gemm_v3_warpgroup_bf16(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
                             int M, int N, int K, char lhs_format, char rhs_format,

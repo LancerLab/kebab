@@ -84,7 +84,7 @@ operators:
     modes: [RC]
     # Precision: float32, float16, bfloat16
     # Note: bfloat16 is only supported by CUDA GEMM kernels (not CuTe)
-    precisions: [float16]
+    precisions: [float16, bfloat16]
     # Tile sizes (for tuning): [M, N, K]
     # IMPORTANT: K dimension MUST be 64 for GMMA Layout_K_SW128_Atom compatibility
     # Supported configurations:
