@@ -136,34 +136,52 @@ __device__ static inline uint64_t make_smem_desc(T* ptr) {
   desc |= matrix_descriptor_encode(addr);
 
   // Determine stride and leading dimension based on major order and swizzle
-  uint64_t stride_bytes = 0;
-  uint64_t leading_dim = 0;
+  uint64_t LBO = 0;
+  uint64_t SBO = 0;
 
   if constexpr (MajorOrder == WGMMA_MajorOrder::K_MAJOR) {
     // K-major layout: stride varies by swizzle pattern
     switch (Swizzle) {
-    case WGMMA_Swizzle::NS:
-      stride_bytes = 128;
-      leading_dim = 64;
+    case WGMMA_Swizzle::NS: // TODO: verify this with case
+      LBO = 256; // unit offset
+      SBO = 128; // distance between 8 rows, if each row is 64 elements of __half = 128B, 8 rows is 1024B
       break;
     case WGMMA_Swizzle::B32:
-      stride_bytes = 16;
-      leading_dim = 256;
+      LBO = 16; // offset of each element is 16B
+      SBO = 256; // 8x2*16B, total panel is 256B, offset between row 0 to row 8 is 256B
       break;
     case WGMMA_Swizzle::B64:
-      stride_bytes = 16;
-      leading_dim = 512;
+      LBO = 16; // offset of each element is 16B
+      SBO = 512; // 8x4*16B, total panel is 512B, offset between row 0 to row 8 is 512B
       break;
     case WGMMA_Swizzle::B128:
-      stride_bytes = 16;
-      leading_dim = 1024;
+      LBO = 16; // offset of each element is 16B
+      SBO = 1024; // 8x8*16B, total panel is 1024B, offset between row 0 to row 8 is 1024B
+      break;
+    }
+  } else if constexpr (MajorOrder == WGMMA_MajorOrder::MN_MAJOR) {
+    switch (Swizzle) {
+    case WGMMA_Swizzle::NS:
+      LBO = 256; // unit offset
+      SBO = 128; // distance between 8 rows, if each row is 64 elements of __half = 128B, 8 rows is 1024B
+      break;
+    case WGMMA_Swizzle::B32:
+      LBO = 256; // offset of each element is 16B
+      SBO = 512; // 8x2*16B, total panel is 256B, offset between row 0 to row 8 is 256B
+      break;
+    case WGMMA_Swizzle::B64:
+      LBO = 512; // offset of each element is 16B
+      SBO = 1024; // 8x4*16B, total panel is 512B, offset between row 0 to row 8 is 512B
+      break;
+    case WGMMA_Swizzle::B128:
+      LBO = 1024; // offset of each element is 16B
+      SBO = 2048; // 8x8*16B, total panel is 1024B, offset between row 0 to row 8 is 1024B
       break;
     }
   }
-  // TODO: MN-major not handled
   
-  desc |= matrix_descriptor_encode(stride_bytes) << 16;
-  desc |= matrix_descriptor_encode(leading_dim) << 32;
+  desc |= matrix_descriptor_encode(LBO) << 16;
+  desc |= matrix_descriptor_encode(SBO) << 32;
   desc |= static_cast<uint64_t>(Swizzle) << 62;
 
   return desc;

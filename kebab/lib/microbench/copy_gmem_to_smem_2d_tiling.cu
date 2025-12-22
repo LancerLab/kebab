@@ -310,56 +310,60 @@ __global__ void kernel_copy_2d_cute_tiled(const float* __restrict__ gmem,
 __global__ void kernel_copy_2d_cute_tiled_float4(const float* __restrict__ gmem,
                                                  float* __restrict__ output,
                                                  int matrix_size) {
-    extern __shared__ float alignas(128) smem_cute[];
+    // extern __shared__ float alignas(128) smem_cute[];
 
-    // Define global memory layout and tensors
-    auto gmem_layout = make_layout(make_shape(matrix_size, matrix_size));
-    auto gmem_tensor = make_tensor(make_gmem_ptr(gmem), gmem_layout);
-    auto out_tensor = make_tensor(make_gmem_ptr(output), gmem_layout);
+    // // Define global memory layout and tensors
+    // auto gmem_layout = make_layout(make_shape(matrix_size, matrix_size));
+    // auto gmem_tensor = make_tensor(make_gmem_ptr(gmem), gmem_layout);
+    // auto out_tensor = make_tensor(make_gmem_ptr(output), gmem_layout);
 
     // Define shared memory layout and tensor
     // auto smem_layout = make_layout(make_shape(Int<TILE_SIZE>{}, Int<TILE_SIZE>{}));
-    auto smem_layout = tile_to_shape(SM90::GMMA::Layout_K_SW128_Atom<float>{}, make_shape(Int<TILE_SIZE>{}, Int<TILE_SIZE>{}));
-    auto smem_tensor = make_tensor(make_smem_ptr(smem_cute), smem_layout);
+    __shared__ __half smem_cute[64*64];
+    auto smem_layout = tile_to_shape(SM90::GMMA::Layout_K_SW128_Atom<__half>{}, make_shape(Int<64>{}, Int<64>{}));
+    auto canonical = logical_divide(smem_layout, Tile<Layout<_8,_1>, Layout<_2,_1>>{});
+    if (cute::thread0())
+        cute::print_layout(canonical);
+    // auto smem_tensor = make_tensor(make_smem_ptr(smem_cute), canonical);
     // auto smem_desc = SM90::GMMA::make_gmma_desc<SM90::GMMA::Major::K>(smem_tensor);
     // // print this desc to get LBO and SBO
     // if (blockIdx.x == 0 && threadIdx.x == 0) {
     //     printf("Full descriptor: %016llx\n", smem_desc.desc_);
     // }
 
-    // Block level tiling on gmem
-    Tensor tiled_gmem_tensors = tiled_divide(gmem_tensor, make_shape(Int<TILE_SIZE>{}, Int<TILE_SIZE>{}));
-    Tensor tiled_out_tensors = tiled_divide(out_tensor, make_shape(Int<TILE_SIZE>{}, Int<TILE_SIZE>{}));
-    Tensor tiled_gmem_tensor = tiled_gmem_tensors(make_coord(_, _), blockIdx.x, blockIdx.y);
-    Tensor tiled_out_tensor = tiled_out_tensors(make_coord(_, _), blockIdx.x, blockIdx.y);
+    // // Block level tiling on gmem
+    // Tensor tiled_gmem_tensors = tiled_divide(gmem_tensor, make_shape(Int<TILE_SIZE>{}, Int<TILE_SIZE>{}));
+    // Tensor tiled_out_tensors = tiled_divide(out_tensor, make_shape(Int<TILE_SIZE>{}, Int<TILE_SIZE>{}));
+    // Tensor tiled_gmem_tensor = tiled_gmem_tensors(make_coord(_, _), blockIdx.x, blockIdx.y);
+    // Tensor tiled_out_tensor = tiled_out_tensors(make_coord(_, _), blockIdx.x, blockIdx.y);
 
-    // Create tiled copy with float (scalar)
-    // Thread layout: 32x4 = 128 threads (m-major: stride<1,32>)
-    // Value layout: 1x8 = 8 floats per thread
-    // Total per tile: 32*1 x 4*8 = 32 x 32 = 1024 floats = TILE_SIZE*TILE_SIZE
-    using CopyAtom = Copy_Atom<UniversalCopy<float>, float>;
-    auto tiled_copy = make_tiled_copy(
-        CopyAtom{},
-        Layout<Shape<Int<32>, Int<4>>, Stride<Int<1>, Int<32>>>{},  // Thread layout: 32x4 m-major
-        Layout<Shape<Int<1>, Int<8>>>{}                              // Value layout: 1x8 (8 floats)
-    );
+    // // Create tiled copy with float (scalar)
+    // // Thread layout: 32x4 = 128 threads (m-major: stride<1,32>)
+    // // Value layout: 1x8 = 8 floats per thread
+    // // Total per tile: 32*1 x 4*8 = 32 x 32 = 1024 floats = TILE_SIZE*TILE_SIZE
+    // using CopyAtom = Copy_Atom<UniversalCopy<float>, float>;
+    // auto tiled_copy = make_tiled_copy(
+    //     CopyAtom{},
+    //     Layout<Shape<Int<32>, Int<4>>, Stride<Int<1>, Int<32>>>{},  // Thread layout: 32x4 m-major
+    //     Layout<Shape<Int<1>, Int<8>>>{}                              // Value layout: 1x8 (8 floats)
+    // );
 
-    auto thr_copy = tiled_copy.get_slice(threadIdx.x);
+    // auto thr_copy = tiled_copy.get_slice(threadIdx.x);
 
-    // Partition tensors for this thread
-    auto thr_gmem = thr_copy.partition_S(tiled_gmem_tensor);
-    auto thr_smem = thr_copy.partition_D(smem_tensor);
+    // // Partition tensors for this thread
+    // auto thr_gmem = thr_copy.partition_S(tiled_gmem_tensor);
+    // auto thr_smem = thr_copy.partition_D(smem_tensor);
 
-    // Copy GMEM → SMEM
-    copy(tiled_copy, thr_gmem, thr_smem);
-    __syncthreads();
+    // // Copy GMEM → SMEM
+    // copy(tiled_copy, thr_gmem, thr_smem);
+    // __syncthreads();
 
-    // Partition output tensor for this thread
-    auto thr_out = thr_copy.partition_D(tiled_out_tensor);
+    // // Partition output tensor for this thread
+    // auto thr_out = thr_copy.partition_D(tiled_out_tensor);
 
-    // Copy SMEM → GMEM
-    copy(tiled_copy, thr_smem, thr_out);
-    __syncthreads();
+    // // Copy SMEM → GMEM
+    // copy(tiled_copy, thr_smem, thr_out);
+    // __syncthreads();
 }
 
 // ============================================================================
@@ -568,8 +572,8 @@ int main() {
     std::cout << "Warmup: 20 iterations | Measurement: 200 iterations\n\n";
 
     // Test different matrix sizes
-    std::vector<int> matrix_sizes = {32, 64, 128, 256, 512, 1024, 2048, 4096};
-    // std::vector<int> matrix_sizes = {32};
+    // std::vector<int> matrix_sizes = {32, 64, 128, 256, 512, 1024, 2048, 4096};
+    std::vector<int> matrix_sizes = {1024};
 
     for (int size : matrix_sizes) {
         std::cout << "=== Matrix Size: " << size << "x" << size << " ===\n";

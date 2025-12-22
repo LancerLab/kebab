@@ -62,140 +62,147 @@ gemm_v2_wgmma_tma_kernel(int M, int N, int K, T* C,
                           const CUtensorMap* tensorMapA,
                           const CUtensorMap* tensorMapB) {
 
-    if constexpr (MajorOrderA == WGMMA_MajorOrder::K_MAJOR && MajorOrderB == WGMMA_MajorOrder::K_MAJOR) {
-        // Compute V2_BK based on swizzle pattern
-        // V2_BK * sizeof(T) must equal swizzle width in bytes
-        // B32: 32 bytes, B64: 64 bytes, B128: 128 bytes
-        constexpr int V2_BK =
-            (SwizzleA == WGMMA_Swizzle::B32) ? (32 / sizeof(T)) :
-            (SwizzleA == WGMMA_Swizzle::B64) ? (64 / sizeof(T)) :
-            (SwizzleA == WGMMA_Swizzle::B128) ? (128 / sizeof(T)) :
-            (32 / sizeof(T)); // default to B32
+    // Compute V2_BK based on swizzle pattern
+    // V2_BK * sizeof(T) must equal swizzle width in bytes
+    // B32: 32 bytes, B64: 64 bytes, B128: 128 bytes
+    constexpr int V2_BK =
+        (SwizzleA == WGMMA_Swizzle::B32) ? (32 / sizeof(T)) :
+        (SwizzleA == WGMMA_Swizzle::B64) ? (64 / sizeof(T)) :
+        (SwizzleA == WGMMA_Swizzle::B128) ? (128 / sizeof(T)) :
+        (16 / sizeof(T)); // default to NS
 
-        // Shared memory for A and B tiles
-        // Alignment must be at least 128 bytes for TMA
-        __shared__ alignas(256) T sA[V2_BM * V2_BK];
-        __shared__ alignas(256) T sB[V2_BK * V2_BN];
+    // Shared memory for A and B tiles
+    // Alignment must be at least 128 bytes for TMA
+    __shared__ alignas(256) T sA[V2_BM * V2_BK];
+    __shared__ alignas(256) T sB[V2_BK * V2_BN];
 
-        // Accumulator: 64x64 output = 4 x 8 floats per thread (128 threads)
-        float d[V2_BM/V2_WGMMA_M][V2_BN/V2_WGMMA_N][V2_WGMMA_N / 16][8];
-        // static_assert(sizeof(d) * 128 == V2_BM * V2_BN * sizeof(float));
-        memset(d, 0, sizeof(d));
+    // Accumulator: 64x64 output = 4 x 8 floats per thread (128 threads)
+    float d[V2_BM/V2_WGMMA_M][V2_BN/V2_WGMMA_N][V2_WGMMA_N / 16][8];
+    // static_assert(sizeof(d) * 128 == V2_BM * V2_BN * sizeof(float));
+    memset(d, 0, sizeof(d));
 
-        const int num_blocks_k = K / V2_BK;
-        int num_block_n = blockIdx.x % (N / V2_BN);
-        int num_block_m = blockIdx.x / (N / V2_BN);
+    const int num_blocks_k = K / V2_BK;
+    int num_block_n = blockIdx.x % (N / V2_BN);
+    int num_block_m = blockIdx.x / (N / V2_BN);
 
-        // Initialize barriers
-        #pragma nv_diag_suppress static_var_with_dynamic_init
+    // Initialize barriers
+    #pragma nv_diag_suppress static_var_with_dynamic_init
 
-        // TMA barriers
-        __shared__ barrier barA;
-        __shared__ barrier barB;
+    // TMA barriers
+    __shared__ barrier barA;
+    __shared__ barrier barB;
 
+    if (threadIdx.x == 0) {
+        init(&barA, blockDim.x);
+        init(&barB, blockDim.x);
+        cde::fence_proxy_async_shared_cta();
+    }
+    __syncthreads();
+    // TMA barriers end
+
+    barrier::arrival_token tokenA, tokenB;
+
+    // Main K-loop
+    // iterate over K dim, each time, one warpgroup load a tile of A and B from global to shared mem
+    // A is 64x64 tile, B is 64x64 tile
+    // then perform 4 unrolled WGMMA operation, each time, one warpgroup compute a 64x64 tile of C
+    // NOTE: here we send different offset to wgmma, is equivalent to cute way without calculate offset
+    for (int block_k_iter = 0; block_k_iter < num_blocks_k; ++block_k_iter) {
+        // TMA Load A and B tiles
         if (threadIdx.x == 0) {
-            init(&barA, blockDim.x);
-            init(&barB, blockDim.x);
-            cde::fence_proxy_async_shared_cta();
-        }
-        __syncthreads();
-        // TMA barriers end
+            cde::cp_async_bulk_tensor_2d_global_to_shared(
+                &sA[0], tensorMapA, block_k_iter * V2_BK, num_block_m * V2_BM, barA);
+            tokenA = cuda::device::barrier_arrive_tx(barA, 1, sizeof(sA));
 
-        barrier::arrival_token tokenA, tokenB;
-
-        // Main K-loop
-        // iterate over K dim, each time, one warpgroup load a tile of A and B from global to shared mem
-        // A is 64x64 tile, B is 64x64 tile
-        // then perform 4 unrolled WGMMA operation, each time, one warpgroup compute a 64x64 tile of C
-        // NOTE: here we send different offset to wgmma, is equivalent to cute way without calculate offset
-        for (int block_k_iter = 0; block_k_iter < num_blocks_k; ++block_k_iter) {
-            // TMA Load A and B tiles
-            if (threadIdx.x == 0) {
-                cde::cp_async_bulk_tensor_2d_global_to_shared(
-                    &sA[0], tensorMapA, block_k_iter * V2_BK, num_block_m * V2_BM, barA);
-                tokenA = cuda::device::barrier_arrive_tx(barA, 1, sizeof(sA));
-
+            if (MajorOrderB == WGMMA_MajorOrder::K_MAJOR) {
                 cde::cp_async_bulk_tensor_2d_global_to_shared(
                     &sB[0], tensorMapB, block_k_iter * V2_BK, num_block_n * V2_BN, barB);
-                tokenB = cuda::device::barrier_arrive_tx(barB, 1, sizeof(sB));
             } else {
-                tokenA = barA.arrive();
-                tokenB = barB.arrive();
+                cde::cp_async_bulk_tensor_2d_global_to_shared(
+                    &sB[0], tensorMapB, num_block_n * V2_BN, block_k_iter * V2_BK, barB);
             }
-            barA.wait(std::move(tokenA));
-            barB.wait(std::move(tokenB));
-            __syncthreads();
+            tokenB = cuda::device::barrier_arrive_tx(barB, 1, sizeof(sB));
+        } else {
+            tokenA = barA.arrive();
+            tokenB = barB.arrive();
+        }
+        barA.wait(std::move(tokenA));
+        barB.wait(std::move(tokenB));
+        __syncthreads();
 
-            // WGMMA Compute: 4 iterations of K=16 each (total BK=64)
-            warpgroup_arrive();
+        // WGMMA Compute: 4 iterations of K=16 each (total BK=64)
+        warpgroup_arrive();
+        #pragma unroll
+        for (int m_iter = 0; m_iter < V2_BM / V2_WGMMA_M; ++m_iter) {
             #pragma unroll
-            for (int m_iter = 0; m_iter < V2_BM / V2_WGMMA_M; ++m_iter) {
+            for (int n_iter = 0; n_iter < V2_BN / V2_WGMMA_N; ++n_iter) {
                 #pragma unroll
-                for (int n_iter = 0; n_iter < V2_BN / V2_WGMMA_N; ++n_iter) {
-                    #pragma unroll
-                    for (int k_iter = 0; k_iter < V2_BK / V2_WGMMA_K; ++k_iter) {
-                        // Use unified wgmma64 API for both FP16 and BF16
+                for (int k_iter = 0; k_iter < V2_BK / V2_WGMMA_K; ++k_iter) {
+                    // Use unified wgmma64 API for both FP16 and BF16
+                    if constexpr (MajorOrderB == WGMMA_MajorOrder::K_MAJOR) {
                         wgmma<WGMMA_MMAShape::M64N64K16, MajorOrderA, MajorOrderB, SwizzleA, SwizzleB, T>(
                             d[m_iter][n_iter],
                             &sA[m_iter * V2_WGMMA_M * V2_BK + k_iter * V2_WGMMA_K],
                             &sB[n_iter * V2_WGMMA_N * V2_BK + k_iter * V2_WGMMA_K]);
-                    }
-                }
-            }
-            warpgroup_commit_batch();
-            warpgroup_wait<0>();
-        }
-
-        // Store results to global memory (column-major C)
-        // lane: 0-31, warp: 0-3
-        // each warp handles 16 rows, thus row_base = warp * 16
-        // every 4 lane (0-3) handles same row, row_base + lane / 4
-        // each 4 lane team, handles 2 rows, (row, ...) and (row+8, ...)
-        // this is easy to calcute: 32threads together handle 16rows, 4 threads per row, need 2 iterations
-        // colwise:
-        // group per 16 col, iterates 4 times, w = 0-3, col_base = w * 16, each time 4 lane handles 2 col
-        // tid 0-3 handles 1 row 16 col, each handle (row, col), (row, col+1), (row, col+8), (row, col+9)
-        {
-            int tid = threadIdx.x;
-            int lane = tid % 32;
-            int warp = tid / 32;
-            uint32_t row = warp * 16 + lane / 4;
-            T *block_C = C + num_block_n * V2_BN * M + num_block_m * V2_BM;
-
-            for (int m_it = 0; m_it < V2_BM / V2_WGMMA_M; ++m_it) {
-                for (int n_it = 0; n_it < V2_BN / V2_WGMMA_N; ++n_it) {
-                    for (int w = 0; w < V2_WGMMA_N / 16; ++w) {
-                        int col = 16 * w + 2 * (tid % 4);
-                        #define IDX(i, j) ((j + n_it * V2_WGMMA_N) * M + ((i) + m_it * V2_WGMMA_M))
-
-                        if constexpr (std::is_same_v<T, __half>) {
-                            block_C[IDX(row, col)] = __float2half(d[m_it][n_it][w][0]);
-                            block_C[IDX(row, col + 1)] = __float2half(d[m_it][n_it][w][1]);
-                            block_C[IDX(row + 8, col)] = __float2half(d[m_it][n_it][w][2]);
-                            block_C[IDX(row + 8, col + 1)] = __float2half(d[m_it][n_it][w][3]);
-                            block_C[IDX(row, col + 8)] = __float2half(d[m_it][n_it][w][4]);
-                            block_C[IDX(row, col + 9)] = __float2half(d[m_it][n_it][w][5]);
-                            block_C[IDX(row + 8, col + 8)] = __float2half(d[m_it][n_it][w][6]);
-                            block_C[IDX(row + 8, col + 9)] = __float2half(d[m_it][n_it][w][7]);
-                        } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
-                            block_C[IDX(row, col)] = __float2bfloat16(d[m_it][n_it][w][0]);
-                            block_C[IDX(row, col + 1)] = __float2bfloat16(d[m_it][n_it][w][1]);
-                            block_C[IDX(row + 8, col)] = __float2bfloat16(d[m_it][n_it][w][2]);
-                            block_C[IDX(row + 8, col + 1)] = __float2bfloat16(d[m_it][n_it][w][3]);
-                            block_C[IDX(row, col + 8)] = __float2bfloat16(d[m_it][n_it][w][4]);
-                            block_C[IDX(row, col + 9)] = __float2bfloat16(d[m_it][n_it][w][5]);
-                            block_C[IDX(row + 8, col + 8)] = __float2bfloat16(d[m_it][n_it][w][6]);
-                            block_C[IDX(row + 8, col + 9)] = __float2bfloat16(d[m_it][n_it][w][7]);
-                        }
-
-                        #undef IDX
+                    } else {
+                        wgmma<WGMMA_MMAShape::M64N64K16, MajorOrderA, MajorOrderB, SwizzleA, SwizzleB, T>(
+                            d[m_iter][n_iter],
+                            &sA[m_iter * V2_WGMMA_M * V2_BK + k_iter * V2_WGMMA_K],
+                            &sB[k_iter * V2_WGMMA_K + n_iter * V2_WGMMA_N * V2_BK]);
                     }
                 }
             }
         }
-    } else {
-        // Not implemented
-        assert(false);
+        warpgroup_commit_batch();
+        warpgroup_wait<0>();
+    }
+
+    // Store results to global memory (column-major C)
+    // lane: 0-31, warp: 0-3
+    // each warp handles 16 rows, thus row_base = warp * 16
+    // every 4 lane (0-3) handles same row, row_base + lane / 4
+    // each 4 lane team, handles 2 rows, (row, ...) and (row+8, ...)
+    // this is easy to calcute: 32threads together handle 16rows, 4 threads per row, need 2 iterations
+    // colwise:
+    // group per 16 col, iterates 4 times, w = 0-3, col_base = w * 16, each time 4 lane handles 2 col
+    // tid 0-3 handles 1 row 16 col, each handle (row, col), (row, col+1), (row, col+8), (row, col+9)
+    {
+        int tid = threadIdx.x;
+        int lane = tid % 32;
+        int warp = tid / 32;
+        uint32_t row = warp * 16 + lane / 4;
+        T *block_C = C + num_block_n * V2_BN * M + num_block_m * V2_BM;
+
+        for (int m_it = 0; m_it < V2_BM / V2_WGMMA_M; ++m_it) {
+            for (int n_it = 0; n_it < V2_BN / V2_WGMMA_N; ++n_it) {
+                for (int w = 0; w < V2_WGMMA_N / 16; ++w) {
+                    int col = 16 * w + 2 * (tid % 4);
+                    #define IDX(i, j) ((j + n_it * V2_WGMMA_N) * M + ((i) + m_it * V2_WGMMA_M))
+
+                    if constexpr (std::is_same_v<T, __half>) {
+                        block_C[IDX(row, col)] = __float2half(d[m_it][n_it][w][0]);
+                        block_C[IDX(row, col + 1)] = __float2half(d[m_it][n_it][w][1]);
+                        block_C[IDX(row + 8, col)] = __float2half(d[m_it][n_it][w][2]);
+                        block_C[IDX(row + 8, col + 1)] = __float2half(d[m_it][n_it][w][3]);
+                        block_C[IDX(row, col + 8)] = __float2half(d[m_it][n_it][w][4]);
+                        block_C[IDX(row, col + 9)] = __float2half(d[m_it][n_it][w][5]);
+                        block_C[IDX(row + 8, col + 8)] = __float2half(d[m_it][n_it][w][6]);
+                        block_C[IDX(row + 8, col + 9)] = __float2half(d[m_it][n_it][w][7]);
+                    } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+                        block_C[IDX(row, col)] = __float2bfloat16(d[m_it][n_it][w][0]);
+                        block_C[IDX(row, col + 1)] = __float2bfloat16(d[m_it][n_it][w][1]);
+                        block_C[IDX(row + 8, col)] = __float2bfloat16(d[m_it][n_it][w][2]);
+                        block_C[IDX(row + 8, col + 1)] = __float2bfloat16(d[m_it][n_it][w][3]);
+                        block_C[IDX(row, col + 8)] = __float2bfloat16(d[m_it][n_it][w][4]);
+                        block_C[IDX(row, col + 9)] = __float2bfloat16(d[m_it][n_it][w][5]);
+                        block_C[IDX(row + 8, col + 8)] = __float2bfloat16(d[m_it][n_it][w][6]);
+                        block_C[IDX(row + 8, col + 9)] = __float2bfloat16(d[m_it][n_it][w][7]);
+                    }
+
+                    #undef IDX
+                }
+            }
+        }
     }
 }
 
@@ -222,7 +229,7 @@ void gemm_v2_wgmma_tma(const T* A, const T* B, T* C,
         (SwizzleA == WGMMA_Swizzle::B32) ? (32 / sizeof(T)) :
         (SwizzleA == WGMMA_Swizzle::B64) ? (64 / sizeof(T)) :
         (SwizzleA == WGMMA_Swizzle::B128) ? (128 / sizeof(T)) :
-        (32 / sizeof(T)); // default to B32
+        (16 / sizeof(T)); // default to NS
 
     if ((lhs_format != 'R' || rhs_format != 'C') &&
         (lhs_format != 'R' || rhs_format != 'R')) {
@@ -254,8 +261,8 @@ void gemm_v2_wgmma_tma(const T* A, const T* B, T* C,
         } else if (lhs_format == 'R' && rhs_format == 'R') {
             v2_tma_map_A = allocate_and_create_tensor_map_tma<SwizzleA, V2_BM, V2_BK, T>(
                 const_cast<T*>(A), M / V2_BM, K / V2_BK);
-            v2_tma_map_B = allocate_and_create_tensor_map_tma<SwizzleB, V2_BN, V2_BK, T>(
-                const_cast<T*>(B), N / V2_BN, K / V2_BK);
+            v2_tma_map_B = allocate_and_create_tensor_map_tma<SwizzleB, V2_BK, V2_BN, T>(
+                const_cast<T*>(B), K / V2_BK, N / V2_BN);
         }
 
         v2_prev_m = M;
@@ -295,6 +302,10 @@ template void gemm_v2_wgmma_tma<cuda_kernel::WGMMA_Swizzle::B128, cuda_kernel::W
     const __half* A, const __half* B, __half* C,
     int M, int N, int K, char lhs_format, char rhs_format, cudaStream_t stream);
 
+template void gemm_v2_wgmma_tma<cuda_kernel::WGMMA_Swizzle::NS, cuda_kernel::WGMMA_Swizzle::NS, __half>(
+    const __half* A, const __half* B, __half* C,
+    int M, int N, int K, char lhs_format, char rhs_format, cudaStream_t stream);
+
 // BF16 instantiations with B32 swizzle (default)
 template void gemm_v2_wgmma_tma<cuda_kernel::WGMMA_Swizzle::B32, cuda_kernel::WGMMA_Swizzle::B32, __nv_bfloat16>(
     const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
@@ -307,6 +318,11 @@ template void gemm_v2_wgmma_tma<cuda_kernel::WGMMA_Swizzle::B64, cuda_kernel::WG
 
 // BF16 instantiations with B128 swizzle
 template void gemm_v2_wgmma_tma<cuda_kernel::WGMMA_Swizzle::B128, cuda_kernel::WGMMA_Swizzle::B128, __nv_bfloat16>(
+    const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
+    int M, int N, int K, char lhs_format, char rhs_format, cudaStream_t stream);
+
+// BF16 instantiations with NS swizzle
+template void gemm_v2_wgmma_tma<cuda_kernel::WGMMA_Swizzle::NS, cuda_kernel::WGMMA_Swizzle::NS, __nv_bfloat16>(
     const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
     int M, int N, int K, char lhs_format, char rhs_format, cudaStream_t stream);
 
