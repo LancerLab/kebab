@@ -68,7 +68,7 @@ operators:
     # Initialization method for matrices A and B
     # Format: <A_init>-<B_init>
     # Options: one, rand, range, row, col
-    init_method: one-one
+    init_method: rand-col
     # Matrix sizes for benchmarking (M=N=K for square matrices)
     # matrix_sizes: [1024, 2048, 4096, 8192]
     matrix_sizes: [64]
@@ -81,7 +81,7 @@ operators:
     # - RC: A is row-major, B is column-major
     # - CR: A is column-major, B is row-major
     # - CC: Both A and B are column-major
-    modes: [RC, RR]
+    modes: [RR]
     # Precision: float32, float16, bfloat16
     # Note: bfloat16 is only supported by CUDA GEMM kernels (not CuTe)
     precisions: [float16, bfloat16]

@@ -16,6 +16,11 @@
  * Note: Requires SM90 (Hopper) architecture
  */
 
+// ============================================================================
+// VERBOSE DEBUG MODE - Set to 1 to enable detailed debug output
+// ============================================================================
+#define V2_VERBOSE_DEBUG 1
+
 #include "kebab/cuda/cuda_gemm.h"
 #include "kebab/cuda/cuda_kernel_utils.h"
 #include <cuda_fp16.h>
@@ -130,6 +135,28 @@ gemm_v2_wgmma_tma_kernel(int M, int N, int K, T* C,
         barB.wait(std::move(tokenB));
         __syncthreads();
 
+        // VERBOSE: Print shared memory data after TMA load
+        #if V2_VERBOSE_DEBUG
+        if (threadIdx.x == 0 && block_k_iter == 0) {
+            printf("\n=== Block %d: Shared Memory After TMA Load (K-iter %d) ===\n", blockIdx.x, block_k_iter);
+            printf("sA (first 16x16):\n");
+            for (int i = 0; i < 16; ++i) {
+                for (int j = 0; j < 16; ++j) {
+                    printf("%.2f ", static_cast<float>(sA[i * V2_BK + j]));
+                }
+                printf("\n");
+            }
+            printf("\nsB (first 16x16):\n");
+            for (int i = 0; i < 16; ++i) {
+                for (int j = 0; j < 16; ++j) {
+                    printf("%.2f ", static_cast<float>(sB[i * V2_BN + j]));
+                }
+                printf("\n");
+            }
+        }
+        __syncthreads();
+        #endif
+
         // WGMMA Compute: 4 iterations of K=16 each (total BK=64)
         warpgroup_arrive();
         #pragma unroll
@@ -155,6 +182,21 @@ gemm_v2_wgmma_tma_kernel(int M, int N, int K, T* C,
         }
         warpgroup_commit_batch();
         warpgroup_wait<0>();
+
+        // VERBOSE: Print accumulator after WGMMA (only first K-iter)
+        #if V2_VERBOSE_DEBUG
+        if (threadIdx.x == 0 && block_k_iter == 0) {
+            printf("\n=== Block %d: Accumulator After WGMMA (K-iter %d) ===\n", blockIdx.x, block_k_iter);
+            printf("d[0][0] (first 16 values):\n");
+            for (int i = 0; i < 4; ++i) {
+                for (int j = 0; j < 4; ++j) {
+                    printf("%.2f ", d[0][0][0][i*4+j]);
+                }
+                printf("\n");
+            }
+        }
+        __syncthreads();
+        #endif
     }
 
     // Store results to global memory (column-major C)
@@ -203,6 +245,21 @@ gemm_v2_wgmma_tma_kernel(int M, int N, int K, T* C,
                 }
             }
         }
+
+        // VERBOSE: Print final result (column-major C, first 16x16)
+        #if V2_VERBOSE_DEBUG
+        if (threadIdx.x == 0) {
+            printf("\n=== Block %d: Final Result C (first 16x16, column-major) ===\n", blockIdx.x);
+            for (int i = 0; i < 16; ++i) {
+                for (int j = 0; j < 16; ++j) {
+                    // Column-major indexing: C[i,j] = block_C[j*M + i]
+                    printf("%.2f ", static_cast<float>(block_C[j * M + i]));
+                }
+                printf("\n");
+            }
+            printf("=== END RESULT ===\n\n");
+        }
+        #endif
     }
 }
 
@@ -274,10 +331,11 @@ void gemm_v2_wgmma_tma(const T* A, const T* B, T* C,
 
     dim3 grid((M / V2_BM) * (N / V2_BN));
     if (lhs_format == 'R' && rhs_format == 'R') {
-        // TODO: RR mode not yet implemented
+        // RR mode: A row-major, B row-major
         gemm_v2_wgmma_tma_kernel<WGMMA_MajorOrder::K_MAJOR, WGMMA_MajorOrder::MN_MAJOR, SwizzleA, SwizzleB, T><<<grid, V2_NUM_THREADS, 0, stream>>>(
             M, N, K, const_cast<T*>(C), v2_tma_map_A, v2_tma_map_B);
     } else if (lhs_format == 'R' && rhs_format == 'C') {
+        // RC mode: A row-major, B column-major
         gemm_v2_wgmma_tma_kernel<WGMMA_MajorOrder::K_MAJOR, WGMMA_MajorOrder::K_MAJOR, SwizzleA, SwizzleB, T><<<grid, V2_NUM_THREADS, 0, stream>>>(
             M, N, K, const_cast<T*>(C), v2_tma_map_A, v2_tma_map_B);
     }

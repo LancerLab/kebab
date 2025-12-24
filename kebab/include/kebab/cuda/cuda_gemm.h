@@ -43,14 +43,16 @@ void gemm_v1_warptiling_fp16(const __half* A, const __half* B, __half* C,
                               cudaStream_t stream);
 
 /**
- * @brief V2: WGMMA + TMA kernel (RC mode, SM90 Hopper required)
- * A: row-major, B: column-major, C: column-major
+ * @brief V2: WGMMA + TMA kernel (RC and RR modes, SM90 Hopper required)
+ * A: row-major, B: column-major or row-major, C: column-major
  * Uses TMA for efficient global memory loads
  * Uses WGMMA 64x64x16 for Tensor Core computation
  *
  * @tparam SwizzleA Swizzle pattern for A matrix (default: B32)
  * @tparam SwizzleB Swizzle pattern for B matrix (default: B32)
  * @tparam T Data type (__half or __nv_bfloat16)
+ *
+ * Note: Verbose debug output is controlled by V2_VERBOSE_DEBUG macro in cuda_gemm_v2_wgmma_tma.cu
  */
 template<cuda_kernel::WGMMA_Swizzle SwizzleA = cuda_kernel::WGMMA_Swizzle::B32,
          cuda_kernel::WGMMA_Swizzle SwizzleB = cuda_kernel::WGMMA_Swizzle::B32,
