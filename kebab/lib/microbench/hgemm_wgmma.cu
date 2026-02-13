@@ -66,23 +66,23 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
             Alpha alpha, Beta beta)
 {
   // Preconditions
-  CUTE_STATIC_ASSERT_V(rank(shape_MNK) == Int<3>{});                   // (M, N, K)
-  CUTE_STATIC_ASSERT_V(rank(cta_tiler) == Int<3>{});                   // (BLK_M, BLK_N, BLK_K)
+  // CUTE_STATIC_ASSERT_V(rank(shape_MNK) == Int<3>{});                   // (M, N, K)
+  // CUTE_STATIC_ASSERT_V(rank(cta_tiler) == Int<3>{});                   // (BLK_M, BLK_N, BLK_K)
 
-  CUTE_STATIC_ASSERT_V(size(copy_a) == size(mma));                     // NumThreads
-  CUTE_STATIC_ASSERT_V(size(copy_b) == size(mma));                     // NumThreads
+  // CUTE_STATIC_ASSERT_V(size(copy_a) == size(mma));                     // NumThreads
+  // CUTE_STATIC_ASSERT_V(size(copy_b) == size(mma));                     // NumThreads
 
-  static_assert(is_static<ASmemLayout>::value);
-  static_assert(is_static<BSmemLayout>::value);
+  // static_assert(is_static<ASmemLayout>::value);
+  // static_assert(is_static<BSmemLayout>::value);
 
-  CUTE_STATIC_ASSERT_V(size<0>(ASmemLayout{}) == size<0>(cta_tiler));  // BLK_M
-  CUTE_STATIC_ASSERT_V(size<0>(BSmemLayout{}) == size<1>(cta_tiler));  // BLK_N
-  CUTE_STATIC_ASSERT_V(size<1>(ASmemLayout{}) == size<2>(cta_tiler));  // BLK_K
-  CUTE_STATIC_ASSERT_V(size<1>(BSmemLayout{}) == size<2>(cta_tiler));  // BLK_K
+  // CUTE_STATIC_ASSERT_V(size<0>(ASmemLayout{}) == size<0>(cta_tiler));  // BLK_M
+  // CUTE_STATIC_ASSERT_V(size<0>(BSmemLayout{}) == size<1>(cta_tiler));  // BLK_N
+  // CUTE_STATIC_ASSERT_V(size<1>(ASmemLayout{}) == size<2>(cta_tiler));  // BLK_K
+  // CUTE_STATIC_ASSERT_V(size<1>(BSmemLayout{}) == size<2>(cta_tiler));  // BLK_K
 
-  CUTE_STATIC_ASSERT_V(congruent(select<0,2>(shape_MNK), dA));         // dA strides for shape MK
-  CUTE_STATIC_ASSERT_V(congruent(select<1,2>(shape_MNK), dB));         // dB strides for shape NK
-  CUTE_STATIC_ASSERT_V(congruent(select<0,1>(shape_MNK), dC));         // dC strides for shape MN
+  // CUTE_STATIC_ASSERT_V(congruent(select<0,2>(shape_MNK), dA));         // dA strides for shape MK
+  // CUTE_STATIC_ASSERT_V(congruent(select<1,2>(shape_MNK), dB));         // dB strides for shape NK
+  // CUTE_STATIC_ASSERT_V(congruent(select<0,1>(shape_MNK), dC));         // dC strides for shape MN
 
   //
   // Full and Tiled Tensors
@@ -94,6 +94,7 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
   Tensor mC = make_tensor(make_gmem_ptr(C), select<0,1>(shape_MNK), dC); // (M,N)
 
   // Get the appropriate blocks for this thread block
+  // block view of gmem, 64x64
   auto cta_coord = make_coord(blockIdx.x, blockIdx.y, _);              // (m,n,k)
   Tensor gA = local_tile(mA, cta_tiler, cta_coord, Step<_1, X,_1>{});  // (BLK_M,BLK_K,k)
   Tensor gB = local_tile(mB, cta_tiler, cta_coord, Step< X,_1,_1>{});  // (BLK_N,BLK_K,k)
@@ -168,38 +169,38 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
   // Clear the accumulators
   clear(tCrC);
 
-#if 0
-  if(thread0()) {
-    print("  mA : "); print(  mA); print("\n");
-    print("  gA : "); print(  gA); print("\n");
-    print("  sA : "); print(  sA); print("\n");
-    print("tAgA : "); print(tAgA); print("\n");
-    print("tAsA : "); print(tAsA); print("\n");
-  }
-#endif
-
-#if 0
-  if(thread0()) {
-    print("  mB : "); print(  mB); print("\n");
-    print("  gB : "); print(  gB); print("\n");
-    print("  sB : "); print(  sB); print("\n");
-    print("tBgB : "); print(tBgB); print("\n");
-    print("tBsB : "); print(tBsB); print("\n");
-  }
-#endif
-
-#if 0
-  if(thread0()) {
-    print("  mC : "); print(  mC); print("\n");
-    print("  gC : "); print(  gC); print("\n");
-    print("tCsA : "); print(tCsA); print("\n");
-    print("tCsB : "); print(tCsB); print("\n");
-    print("tCgC : "); print(tCgC); print("\n");
-    print("tCrA : "); print(tCrA); print("\n");
-    print("tCrB : "); print(tCrB); print("\n");
-    print("tCrC : "); print(tCrC); print("\n");
-  }
-#endif
+// #if 0
+//   if(thread0()) {
+//     print("  mA : "); print(  mA); print("\n");
+//     print("  gA : "); print(  gA); print("\n");
+//     print("  sA : "); print(  sA); print("\n");
+//     print("tAgA : "); print(tAgA); print("\n");
+//     print("tAsA : "); print(tAsA); print("\n");
+//   }
+// #endif
+// 
+// #if 0
+//   if(thread0()) {
+//     print("  mB : "); print(  mB); print("\n");
+//     print("  gB : "); print(  gB); print("\n");
+//     print("  sB : "); print(  sB); print("\n");
+//     print("tBgB : "); print(tBgB); print("\n");
+//     print("tBsB : "); print(tBsB); print("\n");
+//   }
+// #endif
+// 
+// #if 0
+//   if(thread0()) {
+//     print("  mC : "); print(  mC); print("\n");
+//     print("  gC : "); print(  gC); print("\n");
+//     print("tCsA : "); print(tCsA); print("\n");
+//     print("tCsB : "); print(tCsB); print("\n");
+//     print("tCgC : "); print(tCgC); print("\n");
+//     print("tCrA : "); print(tCrA); print("\n");
+//     print("tCrB : "); print(tCrB); print("\n");
+//     print("tCrC : "); print(tCrC); print("\n");
+//   }
+// #endif
 
   // Total number of k-tiles
   auto K_TILE_MAX  = size<3>(tAgA);
@@ -275,12 +276,16 @@ gemm_kk(int m, int n, int k,
   auto bN = Int<128>{};
   auto bK = Int< 64>{};
   auto cta_tiler = make_shape(bM, bN, bK);                   // (BLK_M, BLK_N, BLK_K)
+  // 64, 64, 64
 
   // Define the smem layouts (static) - K-major for both, no pipelining
+  // tile_to_shape (Layout_K_SW128_Atom<TA>, make_shape(64, 64))
   auto sA = tile_to_shape(GMMA::Layout_K_SW128_Atom<TA>{}, make_shape(bM,bK));
   auto sB = tile_to_shape(GMMA::Layout_K_SW128_Atom<TB>{}, make_shape(bN,bK));
 
   // Define the thread layouts (static) - K-major for both
+  // 16x8 threads per warpgroup, each thread copies 1x8 elements
+  // this design maps to 16x64 = 1024 bytes.
   TiledCopy copyA = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, TA>{},
                                     Layout<Shape<_16,_8>,Stride<_8,_1>>{}, // Thr layout 16x8 k-major
                                     Layout<Shape< _1,_8>>{});              // Val layout  1x8
@@ -309,10 +314,10 @@ gemm_kk(int m, int n, int k,
                                            TC, decltype(dC), decltype(tiled_mma),
                                            decltype(alpha), decltype(beta)>);
 
-  CUTE_CHECK_ERROR(cudaFuncSetAttribute(
-    kernel_ptr,
-    cudaFuncAttributeMaxDynamicSharedMemorySize,
-    smem_size));
+  // CUTE_CHECK_ERROR(cudaFuncSetAttribute(
+  //   kernel_ptr,
+  //   cudaFuncAttributeMaxDynamicSharedMemorySize,
+  //   smem_size));
 
   // Kernel Launch
   cutlass::Status status = cutlass::launch_kernel_on_cluster(params, kernel_ptr,
@@ -332,8 +337,8 @@ gemm_kk(int m, int n, int k,
 int main(int argc, char** argv)
 {
   cudaDeviceProp props;
-  int current_device_id;
-  cudaGetDevice(&current_device_id);
+  int current_device_id = 1;
+  cudaSetDevice(current_device_id);
   cudaGetDeviceProperties(&props, current_device_id);
   cudaError_t error = cudaGetDeviceProperties(&props, 0);
   if (error != cudaSuccess) {

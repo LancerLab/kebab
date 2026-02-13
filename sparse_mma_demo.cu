@@ -1,0 +1,875 @@
+#include <cuda.h>
+#include <cuda_runtime.h>
+#include <cuda_fp16.h>
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstdint>
+#include <vector>
+#include <random>
+#include <algorithm>
+#include <cmath>
+#include <chrono>
+
+
+#define CHECK_CUDA(call)                                                     \
+  do {                                                                       \
+    cudaError_t err = (call);                                                \
+    if (err != cudaSuccess) {                                                \
+      std::fprintf(stderr, "CUDA error %s at %s:%d\n",                   \
+                   cudaGetErrorString(err), __FILE__, __LINE__);            \
+      std::exit(EXIT_FAILURE);                                               \
+    }                                                                        \
+  } while (0)
+
+constexpr int WMMA_M = 16;
+constexpr int WMMA_N = 8;
+constexpr int WMMA_K = 32;
+
+constexpr int M = WMMA_M;
+constexpr int N = WMMA_N;
+constexpr int K = WMMA_K;
+
+constexpr int K_GROUP = 4;
+constexpr int GROUPS_PER_ROW = K / K_GROUP;
+constexpr int PACKED_K = K / 2;  // 2 nonzeros per 4
+constexpr int META_U32_PER_TILE = M * 2;  // supports interleaved2 (row*2) and row-pair layouts
+
+__host__ __device__ inline uint32_t encode_2of4(int i0, int i1) {
+  // Canonical 2:4 metadata encoding used by cuSPARSELt-style formats.
+  // Mapping: 0->(0,1), 1->(0,2), 2->(0,3), 3->(1,2), 4->(1,3), 5->(2,3)
+  if (i0 == 0 && i1 == 1) return 0;
+  if (i0 == 0 && i1 == 2) return 1;
+  if (i0 == 0 && i1 == 3) return 2;
+  if (i0 == 1 && i1 == 2) return 3;
+  if (i0 == 1 && i1 == 3) return 4;
+  if (i0 == 2 && i1 == 3) return 5;
+  return 0;
+}
+
+__host__ __device__ inline void decode_2of4(uint32_t code, int& i0, int& i1) {
+  switch (code & 0x7u) {
+    case 0: i0 = 0; i1 = 1; break;
+    case 1: i0 = 0; i1 = 2; break;
+    case 2: i0 = 0; i1 = 3; break;
+    case 3: i0 = 1; i1 = 2; break;
+    case 4: i0 = 1; i1 = 3; break;
+    case 5: i0 = 2; i1 = 3; break;
+    default: i0 = 0; i1 = 1; break;
+  }
+}
+
+// Offline init: dense -> 2:4 sparse (top-2 per group)
+static void prune_dense_to_sparse_2of4(
+    const std::vector<__half>& A_dense,
+    std::vector<__half>& A_sparse_out) {
+  A_sparse_out = A_dense;
+  for (int m = 0; m < M; ++m) {
+    for (int g = 0; g < K / K_GROUP; ++g) {
+      float vals[4];
+      int idx[4] = {0, 1, 2, 3};
+      for (int i = 0; i < 4; ++i) {
+        vals[i] = std::abs(__half2float(A_sparse_out[m * K + g * K_GROUP + i]));
+      }
+      std::partial_sort(idx, idx + 2, idx + 4,
+                        [&](int a, int b) { return vals[a] > vals[b]; });
+      int i0 = idx[0];
+      int i1 = idx[1];
+      for (int i = 0; i < 4; ++i) {
+        if (i != i0 && i != i1) {
+          A_sparse_out[m * K + g * K_GROUP + i] = __float2half(0.0f);
+        }
+      }
+    }
+  }
+}
+
+// Encode from already-pruned sparse A (2 nonzeros per 4). No top-k selection.
+static bool encode_sparse_to_packed_and_meta(
+    const std::vector<__half>& A_sparse,
+    std::vector<__half>& A_packed,
+    std::vector<uint32_t>& meta_uncompressed) {
+  A_packed.assign(M * PACKED_K, __float2half(0.0f));
+  meta_uncompressed.assign(M * PACKED_K, 0u);
+
+  for (int m = 0; m < M; ++m) {
+    for (int g = 0; g < K / K_GROUP; ++g) {
+      int nz_idx[2] = {-1, -1};
+      int found = 0;
+      for (int i = 0; i < 4; ++i) {
+        float v = __half2float(A_sparse[m * K + g * K_GROUP + i]);
+        if (v != 0.0f) {
+          if (found < 2) nz_idx[found] = i;
+          ++found;
+        }
+      }
+      if (found != 2) {
+        return false;
+      }
+      if (nz_idx[0] > nz_idx[1]) std::swap(nz_idx[0], nz_idx[1]);
+
+      A_packed[m * PACKED_K + g * 2 + 0] = A_sparse[m * K + g * K_GROUP + nz_idx[0]];
+      A_packed[m * PACKED_K + g * 2 + 1] = A_sparse[m * K + g * K_GROUP + nz_idx[1]];
+
+      meta_uncompressed[m * PACKED_K + g * 2 + 0] = static_cast<uint32_t>(nz_idx[0]);
+      meta_uncompressed[m * PACKED_K + g * 2 + 1] = static_cast<uint32_t>(nz_idx[1]);
+    }
+  }
+  return true;
+}
+
+// Encode metadata into ColumnMajorInterleaved<2> layout (CUTLASS-style)
+static void encode_ordered_metadata_rowpair(
+    const std::vector<uint32_t>& meta_group_codes,
+    std::vector<uint32_t>& meta_out) {
+  meta_out.assign(M * 2, 0u);
+  for (int rp = 0; rp < M / 2; ++rp) {
+    int row0 = rp;
+    int row1 = rp + 8;
+
+    uint32_t word0 = 0;
+    uint32_t word1 = 0;
+    for (int g = 0; g < 4; ++g) {
+      uint32_t c0 = meta_group_codes[row0 * GROUPS_PER_ROW + g] & 0xFu;
+      uint32_t c1 = meta_group_codes[row1 * GROUPS_PER_ROW + g] & 0xFu;
+      word0 |= (c0 << (4 * g));
+      word0 |= (c1 << (16 + 4 * g));
+    }
+    for (int g = 0; g < 4; ++g) {
+      uint32_t c0 = meta_group_codes[row0 * GROUPS_PER_ROW + (g + 4)] & 0xFu;
+      uint32_t c1 = meta_group_codes[row1 * GROUPS_PER_ROW + (g + 4)] & 0xFu;
+      word1 |= (c0 << (4 * g));
+      word1 |= (c1 << (16 + 4 * g));
+    }
+
+    meta_out[rp * 2 + 0] = word0;
+    meta_out[rp * 2 + 1] = word1;
+  }
+}
+
+static void encode_ordered_metadata_interleaved2(
+    const std::vector<uint32_t>& meta_group_codes,
+    std::vector<uint32_t>& meta_out) {
+  meta_out.assign(M * 2, 0u);
+  for (int m = 0; m < M; ++m) {
+    uint32_t e0 = 0;
+    uint32_t e1 = 0;
+    for (int g = 0; g < 4; ++g) {
+      uint32_t c0 = meta_group_codes[m * GROUPS_PER_ROW + g] & 0xFu;
+      uint32_t c1 = meta_group_codes[m * GROUPS_PER_ROW + (g + 4)] & 0xFu;
+      e0 |= (c0 << (4 * g));
+      e1 |= (c1 << (4 * g));
+    }
+    meta_out[m * 2 + 0] = e0;
+    meta_out[m * 2 + 1] = e1;
+  }
+}
+
+struct FragA {
+  uint32_t x[4];
+};
+
+struct FragB {
+  uint32_t x[4];
+};
+
+struct FragC {
+  float x[4];
+};
+
+
+__device__ __forceinline__ unsigned long long get_smem_ptr(const void* ptr) {
+  unsigned long long smem_ptr;
+  asm("cvta.to.shared.u64 %0, %1;" : "=l"(smem_ptr) : "l"(ptr));
+  return smem_ptr;
+}
+
+template <bool Trans, int NumReg>
+__device__ __forceinline__ void ldmatrix(uint32_t* dst, const void* src) {
+  unsigned long long smem_ptr = get_smem_ptr(src);
+  if constexpr (Trans) {
+    if constexpr (NumReg == 4) {
+      asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];"
+                   : "=r"(dst[0]), "=r"(dst[1]), "=r"(dst[2]), "=r"(dst[3])
+                   : "l"(smem_ptr));
+    } else if constexpr (NumReg == 2) {
+      asm volatile("ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {%0,%1}, [%2];"
+                   : "=r"(dst[0]), "=r"(dst[1])
+                   : "l"(smem_ptr));
+    } else {
+      asm volatile("ldmatrix.sync.aligned.m8n8.x1.trans.shared.b16 {%0}, [%1];"
+                   : "=r"(dst[0])
+                   : "l"(smem_ptr));
+    }
+  } else {
+    if constexpr (NumReg == 4) {
+      asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];"
+                   : "=r"(dst[0]), "=r"(dst[1]), "=r"(dst[2]), "=r"(dst[3])
+                   : "l"(smem_ptr));
+    } else if constexpr (NumReg == 2) {
+      asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];"
+                   : "=r"(dst[0]), "=r"(dst[1])
+                   : "l"(smem_ptr));
+    } else {
+      asm volatile("ldmatrix.sync.aligned.m8n8.x1.shared.b16 {%0}, [%1];"
+                   : "=r"(dst[0])
+                   : "l"(smem_ptr));
+    }
+  }
+}
+
+__device__ __forceinline__ void mma_sp_sync(FragC& d, const FragA& a, const FragB& b, const FragC& c, uint32_t e, int id2, int ordered) {
+#if (__CUDA_ARCH__ >= 800)
+#if ((__CUDACC_VER_MAJOR__ > 12) || (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 5))
+  if (ordered) {
+    if (id2 == 0) {
+      asm volatile(
+          "mma.sp::ordered_metadata.sync.aligned.m16n8k32.row.col.f32.f16.f16.f32 "
+          "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9, %10,%11}, "
+          "{%12,%13,%14,%15}, %16, 0x0;\n"
+          : "=f"(d.x[0]), "=f"(d.x[1]), "=f"(d.x[2]), "=f"(d.x[3])
+          : "r"(a.x[0]), "r"(a.x[1]), "r"(a.x[2]), "r"(a.x[3]),
+            "r"(b.x[0]), "r"(b.x[1]), "r"(b.x[2]), "r"(b.x[3]),
+            "f"(c.x[0]), "f"(c.x[1]), "f"(c.x[2]), "f"(c.x[3]),
+            "r"(e));
+    } else {
+      asm volatile(
+          "mma.sp::ordered_metadata.sync.aligned.m16n8k32.row.col.f32.f16.f16.f32 "
+          "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9, %10,%11}, "
+          "{%12,%13,%14,%15}, %16, 0x1;\n"
+          : "=f"(d.x[0]), "=f"(d.x[1]), "=f"(d.x[2]), "=f"(d.x[3])
+          : "r"(a.x[0]), "r"(a.x[1]), "r"(a.x[2]), "r"(a.x[3]),
+            "r"(b.x[0]), "r"(b.x[1]), "r"(b.x[2]), "r"(b.x[3]),
+            "f"(c.x[0]), "f"(c.x[1]), "f"(c.x[2]), "f"(c.x[3]),
+            "r"(e));
+    }
+  } else {
+    if (id2 == 0) {
+      asm volatile(
+          "mma.sp.sync.aligned.m16n8k32.row.col.f32.f16.f16.f32 "
+          "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9, %10,%11}, "
+          "{%12,%13,%14,%15}, %16, 0x0;\n"
+          : "=f"(d.x[0]), "=f"(d.x[1]), "=f"(d.x[2]), "=f"(d.x[3])
+          : "r"(a.x[0]), "r"(a.x[1]), "r"(a.x[2]), "r"(a.x[3]),
+            "r"(b.x[0]), "r"(b.x[1]), "r"(b.x[2]), "r"(b.x[3]),
+            "f"(c.x[0]), "f"(c.x[1]), "f"(c.x[2]), "f"(c.x[3]),
+            "r"(e));
+    } else {
+      asm volatile(
+          "mma.sp.sync.aligned.m16n8k32.row.col.f32.f16.f16.f32 "
+          "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9, %10,%11}, "
+          "{%12,%13,%14,%15}, %16, 0x1;\n"
+          : "=f"(d.x[0]), "=f"(d.x[1]), "=f"(d.x[2]), "=f"(d.x[3])
+          : "r"(a.x[0]), "r"(a.x[1]), "r"(a.x[2]), "r"(a.x[3]),
+            "r"(b.x[0]), "r"(b.x[1]), "r"(b.x[2]), "r"(b.x[3]),
+            "f"(c.x[0]), "f"(c.x[1]), "f"(c.x[2]), "f"(c.x[3]),
+            "r"(e));
+    }
+  }
+#else
+  if (id2 == 0) {
+    asm volatile(
+        "mma.sp.sync.aligned.m16n8k32.row.col.f32.f16.f16.f32 "
+        "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9, %10,%11}, "
+        "{%12,%13,%14,%15}, %16, 0x0;\n"
+        : "=f"(d.x[0]), "=f"(d.x[1]), "=f"(d.x[2]), "=f"(d.x[3])
+        : "r"(a.x[0]), "r"(a.x[1]), "r"(a.x[2]), "r"(a.x[3]),
+          "r"(b.x[0]), "r"(b.x[1]), "r"(b.x[2]), "r"(b.x[3]),
+          "f"(c.x[0]), "f"(c.x[1]), "f"(c.x[2]), "f"(c.x[3]),
+          "r"(e));
+  } else {
+    asm volatile(
+        "mma.sp.sync.aligned.m16n8k32.row.col.f32.f16.f16.f32 "
+        "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9, %10,%11}, "
+        "{%12,%13,%14,%15}, %16, 0x1;\n"
+        : "=f"(d.x[0]), "=f"(d.x[1]), "=f"(d.x[2]), "=f"(d.x[3])
+        : "r"(a.x[0]), "r"(a.x[1]), "r"(a.x[2]), "r"(a.x[3]),
+          "r"(b.x[0]), "r"(b.x[1]), "r"(b.x[2]), "r"(b.x[3]),
+          "f"(c.x[0]), "f"(c.x[1]), "f"(c.x[2]), "f"(c.x[3]),
+          "r"(e));
+  }
+#endif
+#else
+  (void)d; (void)a; (void)b; (void)c; (void)e; (void)id2; (void)ordered;
+#endif
+}
+
+__device__ __forceinline__ void load_matrix_a_frag(FragA& dst, const __half* base, int ldm, int lane, int trans) {
+  (void)ldm;
+  (void)lane;
+  (void)trans;
+  const __half* src = base;
+  ldmatrix<false, 4>(dst.x, src);
+}
+
+__device__ __forceinline__ void load_matrix_b_frag(FragB& dst, const __half* base, int ldm, int lane, int trans) {
+  (void)ldm;
+  (void)lane;
+  (void)trans;
+  const __half* src = base;
+  ldmatrix<false, 4>(dst.x, src);
+}
+
+__device__ __forceinline__ void load_matrix_b_frag_x2_trans(uint32_t* dst, const __half* base) {
+  unsigned long long smem_ptr = get_smem_ptr(base);
+  asm volatile("ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {%0,%1}, [%2];"
+               : "=r"(dst[0]), "=r"(dst[1])
+               : "l"(smem_ptr));
+}
+
+__device__ __forceinline__ void load_matrix_b_frag_x2(uint32_t* dst, const __half* base) {
+  unsigned long long smem_ptr = get_smem_ptr(base);
+  asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];"
+               : "=r"(dst[0]), "=r"(dst[1])
+               : "l"(smem_ptr));
+}
+
+__device__ __forceinline__ int swizzle_8b_xor(int o) {
+  return o ^ ((o & (7 << 6)) >> 3);
+}
+
+__device__ __forceinline__ void mma_sync(FragC& d, const uint32_t* a, const uint32_t* b, const FragC& c) {
+#if (__CUDA_ARCH__ >= 800)
+  asm volatile(
+      "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+      "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, "
+      "{%10, %11, %12, %13};\n"
+      : "=f"(d.x[0]), "=f"(d.x[1]), "=f"(d.x[2]), "=f"(d.x[3])
+      : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]),
+        "r"(b[0]), "r"(b[1]),
+        "f"(c.x[0]), "f"(c.x[1]), "f"(c.x[2]), "f"(c.x[3]));
+#else
+  (void)d; (void)a; (void)b; (void)c;
+#endif
+}
+
+
+__global__ void sparse_mma_kernel(const __half* a_packed,
+                                  const uint32_t* a_meta,
+                                  const __half* b,
+                                  float* c,
+                                  int a_layout_id,
+                                  int a_trans,
+                                  int b_trans,
+                                  int meta_layout_id,
+                                  int ordered) {
+  if (threadIdx.x >= 32) return;
+  (void)a_layout_id;
+
+  __shared__ alignas(128) __half smem_a[M * PACKED_K];
+  __shared__ alignas(128) __half smem_b[K * N];
+  __shared__ alignas(128) uint32_t smem_meta[META_U32_PER_TILE];
+
+  int lane = threadIdx.x & 31;
+
+  // Load A packed into shared as row-major 16x16 for ldmatrix
+  for (int idx = lane; idx < M * PACKED_K; idx += 32) {
+    int r = idx / PACKED_K;
+    int c = idx % PACKED_K;
+    smem_a[r * PACKED_K + c] = a_packed[r * PACKED_K + c];
+  }
+
+  // Load B into shared as transposed (B^T) for no-trans ldmatrix
+  for (int idx = lane; idx < K * N; idx += 32) {
+    int n = idx / K;
+    int k = idx % K;
+    int offset = n * K + k;
+    smem_b[offset] = b[k * N + n];
+  }
+
+  // Load metadata (row-pair packed ordered-metadata)
+  for (int idx = lane; idx < META_U32_PER_TILE; idx += 32) {
+    smem_meta[idx] = a_meta[idx];
+  }
+
+  __syncthreads();
+
+  FragA a_frag{};
+  FragB b_frag{};
+  FragC c_frag{};
+
+  // Initialize accumulators
+  #pragma unroll
+  for (int i = 0; i < 4; ++i) c_frag.x[i] = 0.0f;
+
+  // Load A/B fragments (no-trans ldmatrix like Samoyeds)
+  load_matrix_a_frag(a_frag, smem_a, PACKED_K, lane, a_trans);
+  load_matrix_b_frag(b_frag, smem_b, K, lane, b_trans);
+
+  // Ordered-metadata: row-pair packed (rows r and r+8)
+  int row_pair = lane / 4;  // 0..7 -> rows (r, r+8)
+  uint32_t e0 = 0;
+  uint32_t e1 = 0;
+  if (meta_layout_id == 0) {
+    // row-pair packed (r, r+8)
+    e0 = smem_meta[row_pair * 2 + 0];
+    e1 = smem_meta[row_pair * 2 + 1];
+  } else {
+    // interleaved2 per-row
+    int row0 = row_pair;
+    int row1 = row_pair + 8;
+    e0 = smem_meta[row0 * 2 + 0] | (smem_meta[row1 * 2 + 0] << 16);
+    e1 = smem_meta[row0 * 2 + 1] | (smem_meta[row1 * 2 + 1] << 16);
+  }
+
+  mma_sp_sync(c_frag, a_frag, b_frag, c_frag, e0, 0, ordered);
+  mma_sp_sync(c_frag, a_frag, b_frag, c_frag, e1, 1, ordered);
+
+  // Store results to global (row-major 16x8)
+  int out_row = row_pair;        // 0..7
+  int out_col = (lane & 3) * 2;  // 0,2,4,6
+  int out_base = out_row * N + out_col;
+  int out_row2 = out_row + 8;
+  int out_base2 = out_row2 * N + out_col;
+  c[out_base + 0] = c_frag.x[0];
+  c[out_base + 1] = c_frag.x[1];
+  c[out_base2 + 0] = c_frag.x[2];
+  c[out_base2 + 1] = c_frag.x[3];
+}
+
+__global__ void dense_mma_kernel(const __half* a_dense,
+                                 const __half* b_row_major,
+                                 const __half* b_col_major,
+                                 float* c,
+                                 int b_layout_id,
+                                 int b_trans,
+                                 int a_trans,
+                                 int swizzle_mask) {
+  if (threadIdx.x >= 32) return;
+
+  __shared__ alignas(128) __half smem_a[16 * 16 * 2];
+  __shared__ alignas(128) __half smem_b[16 * 8 * 2];
+
+  int lane = threadIdx.x & 31;
+
+  // Load A (16x32) into shared as two 16x16 tiles (row-major)
+  for (int idx = lane; idx < 16 * 32; idx += 32) {
+    int r = idx / 32;
+    int k = idx % 32;
+    int tile = k / 16;
+    int kk = k % 16;
+    int off = tile * 256 + r * 16 + kk;
+    if (swizzle_mask & 0x1) {
+      smem_a[swizzle_8b_xor(off)] = a_dense[r * 32 + k];
+    } else {
+      smem_a[off] = a_dense[r * 32 + k];
+    }
+  }
+
+  // Load B (32x8) into shared as two 16x8 tiles
+  for (int idx = lane; idx < 32 * 8; idx += 32) {
+    int k = idx / 8;
+    int n = idx % 8;
+    int tile = k / 16;
+    int kk = k % 16;
+    __half v = (b_layout_id == 0) ? b_row_major[k * 8 + n] : b_col_major[n * 32 + k];
+    int off = tile * 128 + kk * 8 + n;
+    if (swizzle_mask & 0x2) {
+      smem_b[swizzle_8b_xor(off)] = v;
+    } else {
+      smem_b[off] = v;
+    }
+  }
+
+  __syncthreads();
+
+  uint32_t a_frag0[4];
+  uint32_t a_frag1[4];
+  uint32_t b_frag0[2];
+  uint32_t b_frag1[2];
+  FragC c_frag{};
+  #pragma unroll
+  for (int i = 0; i < 4; ++i) c_frag.x[i] = 0.0f;
+
+  // Load A/B fragments for K=0..15
+  if (a_trans) {
+    ldmatrix<true, 4>(a_frag0, smem_a + 0);
+  } else {
+    ldmatrix<false, 4>(a_frag0, smem_a + 0);
+  }
+  if (b_trans) {
+    load_matrix_b_frag_x2_trans(b_frag0, smem_b + 0);
+  } else {
+    load_matrix_b_frag_x2(b_frag0, smem_b + 0);
+  }
+  mma_sync(c_frag, a_frag0, b_frag0, c_frag);
+
+  // Load A/B fragments for K=16..31
+  if (a_trans) {
+    ldmatrix<true, 4>(a_frag1, smem_a + 256);
+  } else {
+    ldmatrix<false, 4>(a_frag1, smem_a + 256);
+  }
+  if (b_trans) {
+    load_matrix_b_frag_x2_trans(b_frag1, smem_b + 128);
+  } else {
+    load_matrix_b_frag_x2(b_frag1, smem_b + 128);
+  }
+  mma_sync(c_frag, a_frag1, b_frag1, c_frag);
+
+  // Store results (microbench mapping)
+  int row_pair = lane / 4;
+  int out_row = row_pair;
+  int out_col = (lane & 3) * 2;
+  int out_base = out_row * N + out_col;
+  int out_row2 = out_row + 8;
+  int out_base2 = out_row2 * N + out_col;
+  c[out_base + 0] = c_frag.x[0];
+  c[out_base + 1] = c_frag.x[1];
+  c[out_base2 + 0] = c_frag.x[2];
+  c[out_base2 + 1] = c_frag.x[3];
+}
+
+
+
+int main() {
+  int device_count = 0;
+  CHECK_CUDA(cudaGetDeviceCount(&device_count));
+  if (device_count == 0) {
+    std::fprintf(stderr, "No CUDA devices found.\n");
+    return EXIT_FAILURE;
+  }
+
+  int device = -1;
+  size_t best_free = 0;
+  cudaDeviceProp prop{};
+
+  for (int d = 0; d < device_count; ++d) {
+    cudaDeviceProp p{};
+    CHECK_CUDA(cudaGetDeviceProperties(&p, d));
+    if (p.major < 9) {
+      continue;
+    }
+    cudaError_t set_err = cudaSetDevice(d);
+    if (set_err != cudaSuccess) {
+      cudaGetLastError();
+      continue;
+    }
+    size_t free_bytes = 0, total_bytes = 0;
+    cudaError_t mem_err = cudaMemGetInfo(&free_bytes, &total_bytes);
+    if (mem_err != cudaSuccess) {
+      cudaGetLastError();
+      continue;
+    }
+    if (free_bytes > best_free) {
+      best_free = free_bytes;
+      device = d;
+      prop = p;
+    }
+  }
+
+  if (device < 0) {
+    std::fprintf(stderr, "No Hopper (sm_90) GPU found.\n");
+    return EXIT_FAILURE;
+  }
+
+  CHECK_CUDA(cudaSetDevice(device));
+  std::printf("Using GPU %d (%s), free memory %.2f GiB\n", device, prop.name,
+              static_cast<double>(best_free) / (1024.0 * 1024.0 * 1024.0));
+
+  std::vector<__half> hA_dense(M * K);
+  std::vector<__half> hA_sparse;
+  std::vector<__half> hB_row(K * N);
+  std::vector<__half> hB_col(K * N);
+  std::vector<__half> hA_packed;
+  std::vector<uint32_t> hA_meta(META_U32_PER_TILE, 0);
+  std::vector<float> hC_sparse(M * N, 0.0f);
+  std::vector<float> hC_ref(M * N, 0.0f);
+  std::vector<float> hC_sim(M * N, 0.0f);
+
+  std::mt19937 rng(42);
+  std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+
+  for (int i = 0; i < M * K; ++i) {
+    hA_dense[i] = __float2half(dist(rng));
+  }
+  const bool debug_identity_b = false;
+  for (int k = 0; k < K; ++k) {
+    for (int n = 0; n < N; ++n) {
+      float v = debug_identity_b ? ((k == n) ? 1.0f : 0.0f) : dist(rng);
+      hB_row[k * N + n] = __float2half(v);  // row-major
+      hB_col[n * K + k] = hB_row[k * N + n];
+    }
+  }
+
+  // Offline prune -> 2:4 sparse, then encode sparse->packed + metadata
+  prune_dense_to_sparse_2of4(hA_dense, hA_sparse);
+  std::vector<uint32_t> meta_uncompressed;
+  bool ok_sparse_encode = encode_sparse_to_packed_and_meta(hA_sparse, hA_packed, meta_uncompressed);
+  if (!ok_sparse_encode) {
+    std::fprintf(stderr, "Sparse encode failed: non-2of4 group detected.\n");
+    return EXIT_FAILURE;
+  }
+
+  std::vector<uint32_t> meta_group_codes(M * GROUPS_PER_ROW, 0u);
+  for (int m = 0; m < M; ++m) {
+    for (int g = 0; g < GROUPS_PER_ROW; ++g) {
+      int i0 = static_cast<int>(meta_uncompressed[m * PACKED_K + g * 2 + 0] & 0x3u);
+      int i1 = static_cast<int>(meta_uncompressed[m * PACKED_K + g * 2 + 1] & 0x3u);
+      if (i0 > i1) std::swap(i0, i1);
+      meta_group_codes[m * GROUPS_PER_ROW + g] = encode_2of4(i0, i1);
+    }
+  }
+  encode_ordered_metadata_rowpair(meta_group_codes, hA_meta);
+
+
+  // CPU reference GEMM: C = A * B (A is pruned sparse, B is row-major)
+  for (int m = 0; m < M; ++m) {
+    for (int n = 0; n < N; ++n) {
+      float acc = 0.0f;
+      for (int k = 0; k < K; ++k) {
+        float a = __half2float(hA_sparse[m * K + k]);
+        float b = __half2float(hB_row[k * N + n]);
+        acc += a * b;
+      }
+      hC_ref[m * N + n] = acc;
+    }
+  }
+
+  // CPU simulation using packed A + metadata (no sparseLT)
+  std::vector<float> hA_sim(M * K, 0.0f);
+  for (int m = 0; m < M; ++m) {
+    for (int g = 0; g < GROUPS_PER_ROW; ++g) {
+      int idx0 = static_cast<int>(meta_uncompressed[m * PACKED_K + g * 2 + 0] & 0x3u);
+      int idx1 = static_cast<int>(meta_uncompressed[m * PACKED_K + g * 2 + 1] & 0x3u);
+      float v0 = __half2float(hA_packed[m * PACKED_K + g * 2 + 0]);
+      float v1 = __half2float(hA_packed[m * PACKED_K + g * 2 + 1]);
+      hA_sim[m * K + g * K_GROUP + idx0] = v0;
+      hA_sim[m * K + g * K_GROUP + idx1] = v1;
+    }
+  }
+
+  for (int m = 0; m < M; ++m) {
+    for (int n = 0; n < N; ++n) {
+      float acc = 0.0f;
+      for (int k = 0; k < K; ++k) {
+        float a = hA_sim[m * K + k];
+        float b = __half2float(hB_row[k * N + n]);
+        acc += a * b;
+      }
+      hC_sim[m * N + n] = acc;
+    }
+  }
+
+
+  __half* dA_packed = nullptr;
+  __half* dA_dense = nullptr;
+  uint32_t* dA_meta = nullptr;
+  __half* dB = nullptr;
+  __half* dB_col = nullptr;
+  float* dC_sparse = nullptr;
+
+  CHECK_CUDA(cudaMalloc(&dA_packed, hA_packed.size() * sizeof(__half)));
+  CHECK_CUDA(cudaMalloc(&dA_dense, hA_sparse.size() * sizeof(__half)));
+  CHECK_CUDA(cudaMalloc(&dA_meta, hA_meta.size() * sizeof(uint32_t)));
+  CHECK_CUDA(cudaMalloc(&dB, hB_row.size() * sizeof(__half)));
+  CHECK_CUDA(cudaMalloc(&dB_col, hB_col.size() * sizeof(__half)));
+  CHECK_CUDA(cudaMalloc(&dC_sparse, hC_sparse.size() * sizeof(float)));
+
+  CHECK_CUDA(cudaMemcpy(dA_packed, hA_packed.data(), hA_packed.size() * sizeof(__half), cudaMemcpyHostToDevice));
+  CHECK_CUDA(cudaMemcpy(dA_dense, hA_sparse.data(), hA_sparse.size() * sizeof(__half), cudaMemcpyHostToDevice));
+  CHECK_CUDA(cudaMemcpy(dB, hB_row.data(), hB_row.size() * sizeof(__half), cudaMemcpyHostToDevice));
+  CHECK_CUDA(cudaMemcpy(dB_col, hB_col.data(), hB_col.size() * sizeof(__half), cudaMemcpyHostToDevice));
+
+  dim3 grid(1, 1, 1);
+  dim3 block(32, 1, 1);
+
+  cudaEvent_t start, stop;
+  CHECK_CUDA(cudaEventCreate(&start));
+  CHECK_CUDA(cudaEventCreate(&stop));
+
+  float sparse_ms = 0.0f;
+  float best_err = 1e9f;
+
+  const int kALayouts = 1;
+  const int kTransOptions = 1;
+  int best_a_layout = 0;
+  int best_a_trans = 0;
+  int best_b_trans = 0;
+
+  const int kMetaLayouts = 2;
+  const int kOrderedOptions = 2;
+  int best_meta_layout = 0;
+  int best_ordered = 1;
+
+  // Debug dense path
+  float best_dense_err = 1e9f;
+  int best_dense_swz = 0, best_dense_a_trans = 0, best_dense_b_layout = 0, best_dense_b_trans = 0;
+  for (int swz = 0; swz < 4; ++swz) {
+    for (int a_trans = 0; a_trans < 2; ++a_trans) {
+      for (int b_layout = 0; b_layout < 2; ++b_layout) {
+        for (int b_trans = 0; b_trans < 2; ++b_trans) {
+          dense_mma_kernel<<<grid, block>>>(dA_dense, dB, dB_col, dC_sparse, b_layout, b_trans, a_trans, swz);
+        CHECK_CUDA(cudaDeviceSynchronize());
+        CHECK_CUDA(cudaMemcpy(hC_sparse.data(), dC_sparse, hC_sparse.size() * sizeof(float), cudaMemcpyDeviceToHost));
+        float dense_max_err = 0.0f;
+        float dense_max_err_a_col = 0.0f;
+        for (int i = 0; i < M * N; ++i) {
+          dense_max_err = std::max(dense_max_err, std::abs(hC_sparse[i] - hC_ref[i]));
+        }
+        // Compare with reference using A interpreted as column-major
+        for (int m = 0; m < M; ++m) {
+          for (int n = 0; n < N; ++n) {
+            float acc = 0.0f;
+            for (int k = 0; k < K; ++k) {
+              float a = __half2float(hA_sparse[k * M + m]);
+              float b = __half2float(hB_row[k * N + n]);
+              acc += a * b;
+            }
+            float err = std::abs(hC_sparse[m * N + n] - acc);
+            dense_max_err_a_col = std::max(dense_max_err_a_col, err);
+          }
+        }
+          std::printf("Dense mma.sync max abs error (swz %d, A trans %d, B layout %d, B trans %d): %.6f | A col-ref %.6f\n",
+                      swz, a_trans, b_layout, b_trans, dense_max_err, dense_max_err_a_col);
+          if (dense_max_err < best_dense_err) {
+            best_dense_err = dense_max_err;
+            best_dense_swz = swz;
+            best_dense_a_trans = a_trans;
+            best_dense_b_layout = b_layout;
+            best_dense_b_trans = b_trans;
+          }
+        }
+      }
+    }
+  }
+  std::printf("Best dense config: swz %d, A trans %d, B layout %d, B trans %d (max abs err %.6f)\n",
+              best_dense_swz, best_dense_a_trans, best_dense_b_layout, best_dense_b_trans, best_dense_err);
+
+  for (int meta_layout = 0; meta_layout < kMetaLayouts; ++meta_layout) {
+    if (meta_layout == 0) {
+      encode_ordered_metadata_rowpair(meta_group_codes, hA_meta);
+    } else {
+      encode_ordered_metadata_interleaved2(meta_group_codes, hA_meta);
+    }
+    CHECK_CUDA(cudaMemcpy(dA_meta, hA_meta.data(), hA_meta.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
+
+    for (int ordered = 0; ordered < kOrderedOptions; ++ordered) {
+      for (int a_layout = 0; a_layout < kALayouts; ++a_layout) {
+        for (int a_trans = 0; a_trans < kTransOptions; ++a_trans) {
+          for (int b_trans = 0; b_trans < kTransOptions; ++b_trans) {
+            CHECK_CUDA(cudaEventRecord(start));
+            sparse_mma_kernel<<<grid, block>>>(dA_packed, dA_meta, dB, dC_sparse, a_layout, a_trans, b_trans, meta_layout, ordered);
+            CHECK_CUDA(cudaEventRecord(stop));
+            CHECK_CUDA(cudaEventSynchronize(stop));
+            float ms = 0.0f;
+            CHECK_CUDA(cudaEventElapsedTime(&ms, start, stop));
+
+            CHECK_CUDA(cudaMemcpy(hC_sparse.data(), dC_sparse, hC_sparse.size() * sizeof(float), cudaMemcpyDeviceToHost));
+
+            float max_err = 0.0f;
+            for (int i = 0; i < M * N; ++i) {
+              float err = std::abs(hC_sparse[i] - hC_ref[i]);
+              max_err = std::max(max_err, err);
+            }
+            if (max_err < best_err) {
+              best_err = max_err;
+              best_a_layout = a_layout;
+              best_a_trans = a_trans;
+              best_b_trans = b_trans;
+              best_meta_layout = meta_layout;
+              best_ordered = ordered;
+              sparse_ms = ms;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Re-run best combination to get final output
+  if (best_meta_layout == 0) {
+    encode_ordered_metadata_rowpair(meta_group_codes, hA_meta);
+  } else {
+    encode_ordered_metadata_interleaved2(meta_group_codes, hA_meta);
+  }
+  CHECK_CUDA(cudaMemcpy(dA_meta, hA_meta.data(), hA_meta.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
+  sparse_mma_kernel<<<grid, block>>>(dA_packed, dA_meta, dB, dC_sparse, best_a_layout, best_a_trans, best_b_trans, best_meta_layout, best_ordered);
+  CHECK_CUDA(cudaDeviceSynchronize());
+  CHECK_CUDA(cudaMemcpy(hC_sparse.data(), dC_sparse, hC_sparse.size() * sizeof(float), cudaMemcpyDeviceToHost));
+
+  float max_abs_err = 0.0f;
+  float max_ref = 0.0f;
+  for (int i = 0; i < M * N; ++i) {
+    float ref = hC_ref[i];
+    float err = std::abs(hC_sparse[i] - ref);
+    max_abs_err = std::max(max_abs_err, err);
+    max_ref = std::max(max_ref, std::abs(ref));
+  }
+  float rel_err = max_abs_err / (max_ref + 1e-6f);
+
+  float max_abs_err_sim_ref = 0.0f;
+  float max_ref_sim = 0.0f;
+  for (int i = 0; i < M * N; ++i) {
+    float ref = hC_ref[i];
+    float err = std::abs(hC_sim[i] - ref);
+    max_abs_err_sim_ref = std::max(max_abs_err_sim_ref, err);
+    max_ref_sim = std::max(max_ref_sim, std::abs(ref));
+  }
+  float rel_err_sim_ref = max_abs_err_sim_ref / (max_ref_sim + 1e-6f);
+
+  float max_abs_err_sim_gpu = 0.0f;
+  float max_ref_sim_gpu = 0.0f;
+  int max_idx_sim_gpu = -1;
+  for (int i = 0; i < M * N; ++i) {
+    float ref = hC_sim[i];
+    float err = std::abs(hC_sparse[i] - ref);
+    if (err > max_abs_err_sim_gpu) {
+      max_abs_err_sim_gpu = err;
+      max_idx_sim_gpu = i;
+    }
+    max_ref_sim_gpu = std::max(max_ref_sim_gpu, std::abs(ref));
+  }
+  float rel_err_sim_gpu = max_abs_err_sim_gpu / (max_ref_sim_gpu + 1e-6f);
+
+
+  auto max_err_for = [&](auto map_fn) {
+    float local_max = 0.0f;
+    for (int m = 0; m < M; ++m) {
+      for (int n = 0; n < N; ++n) {
+        int rm = 0, rn = 0;
+        map_fn(m, n, rm, rn);
+        if (rm < 0 || rm >= M || rn < 0 || rn >= N) continue;
+        float ref = hC_ref[rm * N + rn];
+        float err = std::abs(hC_sparse[m * N + n] - ref);
+        local_max = std::max(local_max, err);
+      }
+    }
+    return local_max;
+  };
+
+  float err_identity = max_err_for([](int m, int n, int& rm, int& rn) { rm = m; rn = n; });
+  float err_swap_halves = max_err_for([](int m, int n, int& rm, int& rn) { rm = (m + 8) & 15; rn = n; });
+  float err_interleave = max_err_for([](int m, int n, int& rm, int& rn) { rm = (m / 2) + (m % 2) * 8; rn = n; });
+  float err_deinterleave = max_err_for([](int m, int n, int& rm, int& rn) { rm = (m % 8) * 2 + (m / 8); rn = n; });
+
+  bool pass = (max_abs_err < 1e-3f) || (rel_err < 1e-3f);
+
+  std::printf("Sparse mma.sp time: %.3f ms\n", sparse_ms);
+  std::printf("Best A layout: %d, A trans: %d, B trans: %d, meta layout: %d, ordered: %d (max abs err %.6f)\n",
+              best_a_layout, best_a_trans, best_b_trans, best_meta_layout, best_ordered, best_err);
+  std::printf("Sparse vs ref max abs error: %.6f (rel %.6f)\n", max_abs_err, rel_err);
+  std::printf("Sim vs ref   max abs error: %.6f (rel %.6f)\n", max_abs_err_sim_ref, rel_err_sim_ref);
+  std::printf("Sparse vs sim max abs error: %.6f (rel %.6f)\n", max_abs_err_sim_gpu, rel_err_sim_gpu);
+  if (max_idx_sim_gpu >= 0) {
+    int mi = max_idx_sim_gpu / N;
+    int ni = max_idx_sim_gpu % N;
+    std::printf("Max sim diff at (m=%d,n=%d): gpu=%.6f sim=%.6f ref=%.6f\n",
+                mi, ni, hC_sparse[max_idx_sim_gpu], hC_sim[max_idx_sim_gpu], hC_ref[max_idx_sim_gpu]);
+  }
+  std::printf("Row-mapping test max errs: identity %.6f, swap_halves %.6f, interleave %.6f, deinterleave %.6f\n",
+              err_identity, err_swap_halves, err_interleave, err_deinterleave);
+  std::printf("%s\n", pass ? "PASS" : "FAIL");
+
+  CHECK_CUDA(cudaEventDestroy(start));
+  CHECK_CUDA(cudaEventDestroy(stop));
+
+  CHECK_CUDA(cudaFree(dA_packed));
+  CHECK_CUDA(cudaFree(dA_dense));
+  CHECK_CUDA(cudaFree(dA_meta));
+  CHECK_CUDA(cudaFree(dB));
+  CHECK_CUDA(cudaFree(dB_col));
+  CHECK_CUDA(cudaFree(dC_sparse));
+
+  return pass ? EXIT_SUCCESS : EXIT_FAILURE;
+}

@@ -1472,3 +1472,17 @@ clean:
 	@$(RM) $(PROFILING_DIR)/*.ncu-rep
 	@$(RM) $(PROFILING_DIR)/*.txt
 	@echo "Clean complete."
+
+# ==========================================================================
+# Sparse WMMA demo (Hopper, 2:4)
+# ==========================================================================
+.PHONY: sparse_mma_demo
+sparse_mma_demo:
+	$(NVCC) $(filter-out -arch=$(CUDA_ARCH),$(NVCC_FLAGS)) -arch=sm_90 sparse_mma_demo.cu -o sparse_mma_demo
+
+# ==========================================================================
+# CUTLASS metadata host encoder probe
+# ==========================================================================
+.PHONY: cutlass_meta_probe
+cutlass_meta_probe:
+	$(NVCC) $(filter-out -arch=$(CUDA_ARCH),$(NVCC_FLAGS)) -arch=sm_90 cutlass_meta_probe.cu -o cutlass_meta_probe
