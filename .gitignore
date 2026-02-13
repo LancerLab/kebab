@@ -2,6 +2,8 @@ build/
 bench_results/
 *.md
 !README.md
+!.github/skills/README.md
+!.github/skills/**/SKILL.md
 tmp/
 profiling/
 reports/
