@@ -19,7 +19,7 @@
 // ============================================================================
 // VERBOSE DEBUG MODE - Set to 1 to enable detailed debug output
 // ============================================================================
-#define V2_VERBOSE_DEBUG 1
+#define V2_VERBOSE_DEBUG 0
 
 #include "kebab/cuda/cuda_gemm.h"
 #include "kebab/cuda/cuda_kernel_utils.h"
