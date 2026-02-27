@@ -1,5 +1,5 @@
 /**
- * @file cuda_gemm_v11_hilbert.cu
+ * @file cuda_gemm_v11_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d_cluster_multicast_tmastore_hilbert.cu
  * @brief CUDA V11 GEMM with Hilbert Curve Scheduling (based on fast.cu kernel 11)
  *
  * Key features:

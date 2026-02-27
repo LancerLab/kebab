@@ -1,5 +1,5 @@
 /**
- * @file cuda_gemm_v7_cluster.cu
+ * @file cuda_gemm_v7_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d.cu
  * @brief CUDA V7 GEMM with PTX barriers + 5D TMA (based on fast.cu kernel 7)
  *
  * Key features:

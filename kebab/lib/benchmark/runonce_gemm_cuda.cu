@@ -49,7 +49,8 @@ void runOnceGEMMCuda(const ConfigParser& config) {
     auto [init_A, init_B] = parseBinaryInitMethod(init_method);
 
     std::cout << "Configuration:" << std::endl;
-    std::cout << "  Implementation: cuda (baseline) version " << version << std::endl;
+    std::cout << "  Implementation: cuda (baseline) version " << version
+              << " (" << baseline::gemm_cuda_version_feature_name(version) << ")" << std::endl;
     std::cout << "  Init method: " << init_method << std::endl;
     std::cout << "  Matrix size: " << matrix_sizes[0] << std::endl;
     std::cout << "  Mode: " << opmode_list[0] << std::endl;
@@ -93,7 +94,8 @@ void runOnceGEMMCuda(const ConfigParser& config) {
 
     // Run CUDA baseline kernel once
     CUDA_CHECK(cudaDeviceSynchronize());
-    std::cout << "\nRunning CUDA baseline kernel (version " << version << ") once..." << std::endl;
+    std::cout << "\nRunning CUDA baseline kernel (version " << version
+              << ": " << baseline::gemm_cuda_version_feature_name(version) << ") once..." << std::endl;
 
     baseline::gemm(d_A, d_B, d_C, M, N, K, opmode.c_str(), version);
 

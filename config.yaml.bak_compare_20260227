@@ -70,7 +70,7 @@ operators:
     # Options: one, rand, range, row, col
     init_method: rand-rand
     # Matrix sizes for benchmarking (M=N=K for square matrices)
-    matrix_sizes: [2048, 4096, 8192]
+    matrix_sizes: [2048]
     # matrix_sizes: [64]
     # Operation modes: specify storage format of LHS and RHS
     # Format: <LHS_format><RHS_format>

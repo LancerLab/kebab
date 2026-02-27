@@ -481,9 +481,10 @@ static CUtensorMap v10_tma_map_B;
 static CUtensorMap v10_tma_map_C;
 static int v10_prev_m = 0, v10_prev_n = 0, v10_prev_k = 0;
 
-void gemm_v10_tmastore_fp16(const __half* A, const __half* B, __half* C,
-                            int M, int N, int K, char lhs_format, char rhs_format,
-                            cudaStream_t stream) {
+void gemm_v10_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d_cluster_multicast_tmastore_fp16(
+    const __half* A, const __half* B, __half* C,
+    int M, int N, int K, char lhs_format, char rhs_format,
+    cudaStream_t stream) {
     if (lhs_format != 'R' || rhs_format != 'C') {
         fprintf(stderr, "ERROR: CUDA V10 only supports RC mode\n");
         return;

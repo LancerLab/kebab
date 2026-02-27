@@ -1,12 +1,12 @@
 /**
- * @file cuda_gemm_v5_persistent.cu
- * @brief CUDA V5 GEMM with larger tiles and register optimization (based on fast.cu kernel 5)
+ * @file cuda_gemm_v6_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler.cu
+ * @brief CUDA V6 GEMM with persistent kernel + tile scheduling (based on fast.cu kernel 6)
  *
  * Key features:
- * - Larger tiles: 128×256×64 (double N dimension)
- * - 3 warp-groups: 1 producer + 2 consumers (384 threads)
- * - Dynamic register allocation via setmaxnreg
- * - Multiple consumers share M dimension
+ * - Persistent kernel: each SM processes multiple tiles
+ * - Grid-constant TMA maps for better performance
+ * - Tile scheduling: 16×8 tile pattern
+ * - 128×256×64 tiles, 3 warp-groups
  *
  * Note: Requires SM90 (Hopper) architecture
  */
@@ -26,52 +26,52 @@ namespace cde = cuda::device::experimental;
 using barrier = cuda::barrier<cuda::thread_scope_block>;
 
 // ============================================================================
-// WGMMA Helper Functions
+// WGMMA Helper Functions (V6)
 // ============================================================================
 
-__device__ static inline uint64_t matrix_descriptor_encode_v5(uint64_t x) {
+__device__ static inline uint64_t matrix_descriptor_encode_v6(uint64_t x) {
     return (((x) & 0x3FFFF) >> 0x4);
 }
 
-__device__ uint64_t make_smem_desc_v5(__half* ptr) {
+__device__ uint64_t make_smem_desc_v6(__half* ptr) {
     uint32_t addr = static_cast<uint32_t>(__cvta_generic_to_shared(ptr));
     uint64_t desc = 0x0000000000000000;
-    desc |= matrix_descriptor_encode_v5(addr);
-    desc |= matrix_descriptor_encode_v5((uint64_t)16) << 16;
-    desc |= matrix_descriptor_encode_v5((uint64_t)1024) << 32;
+    desc |= matrix_descriptor_encode_v6(addr);
+    desc |= matrix_descriptor_encode_v6((uint64_t)16) << 16;
+    desc |= matrix_descriptor_encode_v6((uint64_t)1024) << 32;
     desc |= 1llu << 62;
     return desc;
 }
 
-__device__ void warpgroup_arrive_v5() {
+__device__ void warpgroup_arrive_v6() {
     asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory");
 }
 
-__device__ void warpgroup_commit_batch_v5() {
+__device__ void warpgroup_commit_batch_v6() {
     asm volatile("wgmma.commit_group.sync.aligned;\n" ::: "memory");
 }
 
 template <int N>
-__device__ void warpgroup_wait_v5() {
+__device__ void warpgroup_wait_v6() {
     static_assert(N >= 0 && N <= 7, "WGMMA wait: N must be in range [0, 7]");
     asm volatile("wgmma.wait_group.sync.aligned %0;\n" ::"n"(N) : "memory");
 }
 
 template <uint32_t RegCount>
-__device__ void warpgroup_reg_alloc_v5() {
+__device__ void warpgroup_reg_alloc_v6() {
     asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;\n" : : "n"(RegCount));
 }
 
 template <uint32_t RegCount>
-__device__ void warpgroup_reg_dealloc_v5() {
+__device__ void warpgroup_reg_dealloc_v6() {
     asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;\n" : : "n"(RegCount));
 }
 
 // WGMMA 64×256×16 for FP16
 template<int ScaleD, int ScaleA, int ScaleB, int TransA, int TransB>
-__device__ void wgmma256_v5(float d[16][8], __half* sA, __half* sB) {
-    uint64_t desc_a = make_smem_desc_v5(&sA[0]);
-    uint64_t desc_b = make_smem_desc_v5(&sB[0]);
+__device__ void wgmma256_v6(float d[16][8], __half* sA, __half* sB) {
+    uint64_t desc_a = make_smem_desc_v6(&sA[0]);
+    uint64_t desc_b = make_smem_desc_v6(&sB[0]);
     asm volatile(
         "{\n"
         "wgmma.mma_async.sync.aligned.m64n256k16.f32.f16.f16 "
@@ -137,7 +137,7 @@ __device__ void wgmma256_v5(float d[16][8], __half* sA, __half* sB) {
 // ============================================================================
 
 template <int BlockMajorSize, int BlockMinorSize>
-void create_tensor_map_v5(CUtensorMap *tma_map, __half* gmem_ptr,
+void create_tensor_map_v6(CUtensorMap *tma_map, __half* gmem_ptr,
                           int blocks_height, int blocks_width) {
     void* gmem_address = (void*)gmem_ptr;
     uint64_t gmem_prob_shape[5] = {
@@ -160,48 +160,74 @@ void create_tensor_map_v5(CUtensorMap *tma_map, __half* gmem_ptr,
 }
 
 template<int BlockMajorSize, int BlockMinorSize>
-static inline CUtensorMap* allocate_and_create_tensor_map_v5(
-    __half* src, int blocks_height, int blocks_width) {
-    CUtensorMap *tma_map_d;
-    cudaMalloc(&tma_map_d, sizeof(CUtensorMap));
+static inline CUtensorMap allocate_tensor_map_v6(__half* src, int blocks_height, int blocks_width) {
     CUtensorMap tma_map_host;
-    create_tensor_map_v5<BlockMajorSize, BlockMinorSize>(
-        &tma_map_host, src, blocks_height, blocks_width);
-    cudaMemcpy(tma_map_d, &tma_map_host, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
-    return tma_map_d;
+    create_tensor_map_v6<BlockMajorSize, BlockMinorSize>(&tma_map_host, src, blocks_height, blocks_width);
+    return tma_map_host;
 }
 
 // ============================================================================
-// V5 Kernel Configuration
+// V6 Kernel Configuration
 // ============================================================================
 
-constexpr int V5_BM = 128;
-constexpr int V5_BN = 256;
-constexpr int V5_BK = 64;
-constexpr int V5_NUM_THREADS = 384;  // 3 warp-groups: 1 producer + 2 consumers
-constexpr int V5_QSIZE = 3;
+constexpr int V6_BM = 128;
+constexpr int V6_BN = 256;
+constexpr int V6_BK = 64;
+constexpr int V6_NUM_THREADS = 384;
+constexpr int V6_QSIZE = 3;
+constexpr int V6_NUM_SM = 128;
 
 template <int BM, int BN, int BK, int QSIZE>
-struct SMemV5 {
+struct SMemV6 {
     alignas(128) __half A[BM * BK * QSIZE];
     alignas(128) __half B[BK * BN * QSIZE];
 };
 
 // ============================================================================
-// V5 Kernel: Multiple Consumers with Register Optimization
+// Tile Scheduler for Persistent Kernel
 // ============================================================================
 
-template<int BM, int BN, int BK, int NUM_THREADS, int QSIZE>
+// Simple linear schedule (more robust for all sizes)
+template<int NUM_SM, int BM, int BN>
+struct ScheduleV6 {
+    int st, en;
+    int total_blocks_n;
+
+    __device__ __forceinline__ ScheduleV6(int M, int N, int block) {
+        int total_blocks = (M / BM) * (N / BN);
+        total_blocks_n = N / BN;
+        int blocks_per_sm = total_blocks / NUM_SM;
+        int extra_blocks = total_blocks % NUM_SM;
+        if (block < extra_blocks) {
+            st = block * (blocks_per_sm + 1);
+            en = st + blocks_per_sm + 1;
+        } else {
+            st = extra_blocks + block * blocks_per_sm;
+            en = st + blocks_per_sm;
+        }
+    }
+
+    __device__ __forceinline__ int next() {
+        if (en == st) return -1;
+        return st++;
+    }
+};
+
+// ============================================================================
+// V6 Kernel: Persistent with Tile Scheduling
+// ============================================================================
+
+template<int BM, int BN, int BK, int NUM_THREADS, int QSIZE, int NUM_SM>
 __global__ void __launch_bounds__(NUM_THREADS)
-gemm_v5_persistent_kernel(int M, int N, int K, __half* C,
-                           const CUtensorMap* tensorMapA,
-                           const CUtensorMap* tensorMapB) {
+gemm_v6_persistent_kernel(int M, int N, int K, __half* C,
+                          const __grid_constant__ CUtensorMap tensorMapA,
+                          const __grid_constant__ CUtensorMap tensorMapB) {
     constexpr int WGMMA_M = 64, WGMMA_K = 16, WGMMA_N = BN;
     constexpr int num_consumers = (NUM_THREADS / 128) - 1;
     constexpr int B_WG_M = BM / num_consumers;
 
     extern __shared__ __align__(128) uint8_t smem[];
-    SMemV5<BM, BN, BK, QSIZE> &s = *reinterpret_cast<SMemV5<BM, BN, BK, QSIZE>*>(smem);
+    SMemV6<BM, BN, BK, QSIZE> &s = *reinterpret_cast<SMemV6<BM, BN, BK, QSIZE>*>(smem);
     __half *sA = s.A;
     __half *sB = s.B;
 
@@ -209,8 +235,6 @@ gemm_v5_persistent_kernel(int M, int N, int K, __half* C,
     __shared__ barrier full[QSIZE], empty[QSIZE];
 
     const int num_blocks_k = K / BK;
-    const int total_blocks_n = N / BN;
-    const int total_blocks = (M / BM) * total_blocks_n;
     int wg_idx = threadIdx.x / 128;
     int tid = threadIdx.x % 128;
 
@@ -223,23 +247,25 @@ gemm_v5_persistent_kernel(int M, int N, int K, __half* C,
     }
     __syncthreads();
 
+    ScheduleV6<NUM_SM, BM, BN> schedule(M, N, blockIdx.x);
+
     // Producer warp-group
     if (wg_idx == 0) {
         constexpr int num_regs = (num_consumers <= 2 ? 24 : 32);
-        warpgroup_reg_dealloc_v5<num_regs>();
+        warpgroup_reg_dealloc_v6<num_regs>();
         if (tid == 0) {
-            for (int num_block = blockIdx.x; num_block < total_blocks; num_block += gridDim.x) {
-                int num_block_n = num_block % total_blocks_n;
-                int num_block_m = num_block / total_blocks_n;
+            int qidx = 0;
+            for (int num_block = schedule.next(); num_block >= 0; num_block = schedule.next()) {
+                int num_block_n = num_block % (N / BN);
+                int num_block_m = num_block / (N / BN);
 
-                int qidx = 0;
                 for (int block_k_iter = 0; block_k_iter < num_blocks_k; ++block_k_iter, ++qidx) {
                     if (qidx == QSIZE) qidx = 0;
                     empty[qidx].wait(empty[qidx].arrive());
                     cde::cp_async_bulk_tensor_2d_global_to_shared(
-                        &sA[qidx * BK * BM], tensorMapA, block_k_iter * BK, num_block_m * BM, full[qidx]);
+                        &sA[qidx * BK * BM], &tensorMapA, block_k_iter * BK, num_block_m * BM, full[qidx]);
                     cde::cp_async_bulk_tensor_2d_global_to_shared(
-                        &sB[qidx * BK * BN], tensorMapB, block_k_iter * BK, num_block_n * BN, full[qidx]);
+                        &sB[qidx * BK * BN], &tensorMapB, block_k_iter * BK, num_block_n * BN, full[qidx]);
                     barrier::arrival_token _ = cuda::device::barrier_arrive_tx(
                         full[qidx], 1, (BK * BN + BK * BM) * sizeof(__half));
                 }
@@ -249,46 +275,41 @@ gemm_v5_persistent_kernel(int M, int N, int K, __half* C,
     // Consumer warp-groups
     else {
         constexpr int num_regs = (num_consumers == 1 ? 256 : (num_consumers == 2 ? 240 : 160));
-        warpgroup_reg_alloc_v5<num_regs>();
+        warpgroup_reg_alloc_v6<num_regs>();
+        float d[B_WG_M / WGMMA_M][WGMMA_N / 16][8];
         --wg_idx;
 
         for (int i = 0; i < QSIZE; ++i) {
             barrier::arrival_token _ = empty[i].arrive();
         }
 
-        float d[B_WG_M / WGMMA_M][WGMMA_N / 16][8];
-
-        for (int num_block = blockIdx.x; num_block < total_blocks; num_block += gridDim.x) {
-            int num_block_n = num_block % total_blocks_n;
-            int num_block_m = num_block / total_blocks_n;
-
+        int qidx = 0;
+        for (int num_block = schedule.next(); num_block >= 0; num_block = schedule.next()) {
+            int num_block_n = num_block % (N / BN);
+            int num_block_m = num_block / (N / BN);
             memset(d, 0, sizeof(d));
 
-            int qidx = 0;
             for (int block_k_iter = 0; block_k_iter < num_blocks_k; ++block_k_iter, ++qidx) {
                 if (qidx == QSIZE) qidx = 0;
                 full[qidx].wait(full[qidx].arrive());
 
-                warpgroup_arrive_v5();
+                warpgroup_arrive_v6();
                 #pragma unroll
                 for (int m_it = 0; m_it < B_WG_M / WGMMA_M; ++m_it) {
                     __half *wgmma_sA = sA + qidx * BK * BM + BK * (m_it + wg_idx * B_WG_M / WGMMA_M) * WGMMA_M;
                     #pragma unroll
                     for (int k_it = 0; k_it < BK / WGMMA_K; ++k_it) {
-                        wgmma256_v5<1, 1, 1, 0, 0>(
+                        wgmma256_v6<1, 1, 1, 0, 0>(
                             d[m_it], &wgmma_sA[k_it * WGMMA_K], &sB[qidx * BK * BN + k_it * WGMMA_K]);
                     }
                 }
-                warpgroup_commit_batch_v5();
-                warpgroup_wait_v5<0>();
+                warpgroup_commit_batch_v6();
+                warpgroup_wait_v6<0>();
                 barrier::arrival_token _ = empty[qidx].arrive();
             }
 
             // Store results
-            tid = threadIdx.x % 128;
-            int lane = tid % 32;
-            int warp = tid / 32;
-            int row = warp * 16 + lane / 4;
+            int lane = tid % 32, warp = tid / 32, row = warp * 16 + lane / 4;
             __half *block_C = C + num_block_n * BN * M + num_block_m * BM;
 
             #pragma unroll
@@ -317,39 +338,36 @@ gemm_v5_persistent_kernel(int M, int N, int K, __half* C,
 // Host Function
 // ============================================================================
 
-static CUtensorMap *v5_tma_map_A = nullptr;
-static CUtensorMap *v5_tma_map_B = nullptr;
-static int v5_prev_m = 0, v5_prev_n = 0, v5_prev_k = 0;
+static CUtensorMap v6_tma_map_A;
+static CUtensorMap v6_tma_map_B;
+static int v6_prev_m = 0, v6_prev_n = 0, v6_prev_k = 0;
 
-void gemm_v5_wgmma_tma_warpgroup_warpspecialized_persistent_fp16(const __half* A, const __half* B, __half* C,
-                                                                  int M, int N, int K, char lhs_format, char rhs_format,
-                                                                  cudaStream_t stream) {
+void gemm_v6_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_fp16(const __half* A, const __half* B, __half* C,
+                                                                                 int M, int N, int K, char lhs_format, char rhs_format,
+                                                                                 cudaStream_t stream) {
     if (lhs_format != 'R' || rhs_format != 'C') {
-        fprintf(stderr, "ERROR: CUDA V5 only supports RC mode\n");
+        fprintf(stderr, "ERROR: CUDA V6 only supports RC mode\n");
         return;
     }
-    if (M % V5_BM != 0 || N % V5_BN != 0 || K % V5_BK != 0) {
-        fprintf(stderr, "ERROR: CUDA V5 requires M%%128==0, N%%256==0, K%%64==0\n");
+    if (M % V6_BM != 0 || N % V6_BN != 0 || K % V6_BK != 0) {
+        fprintf(stderr, "ERROR: CUDA V6 requires M%%128==0, N%%256==0, K%%64==0\n");
         return;
     }
 
-    if (!v5_tma_map_A || M != v5_prev_m || N != v5_prev_n || K != v5_prev_k) {
-        if (v5_tma_map_A) cudaFree(v5_tma_map_A);
-        if (v5_tma_map_B) cudaFree(v5_tma_map_B);
-        v5_tma_map_A = allocate_and_create_tensor_map_v5<V5_BM, V5_BK>(
-            const_cast<__half*>(A), M / V5_BM, K / V5_BK);
-        v5_tma_map_B = allocate_and_create_tensor_map_v5<V5_BN, V5_BK>(
-            const_cast<__half*>(B), N / V5_BN, K / V5_BK);
-        v5_prev_m = M; v5_prev_n = N; v5_prev_k = K;
+    if (M != v6_prev_m || N != v6_prev_n || K != v6_prev_k) {
+        v6_tma_map_A = allocate_tensor_map_v6<V6_BM, V6_BK>(
+            const_cast<__half*>(A), M / V6_BM, K / V6_BK);
+        v6_tma_map_B = allocate_tensor_map_v6<V6_BN, V6_BK>(
+            const_cast<__half*>(B), N / V6_BN, K / V6_BK);
+        v6_prev_m = M; v6_prev_n = N; v6_prev_k = K;
     }
 
-    size_t sMemSize = sizeof(SMemV5<V5_BM, V5_BN, V5_BK, V5_QSIZE>);
-    auto kernel = gemm_v5_persistent_kernel<V5_BM, V5_BN, V5_BK, V5_NUM_THREADS, V5_QSIZE>;
+    size_t sMemSize = sizeof(SMemV6<V6_BM, V6_BN, V6_BK, V6_QSIZE>);
+    auto kernel = gemm_v6_persistent_kernel<V6_BM, V6_BN, V6_BK, V6_NUM_THREADS, V6_QSIZE, V6_NUM_SM>;
     cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, sMemSize);
 
-    dim3 grid((M / V5_BM) * (N / V5_BN));
-    kernel<<<grid, V5_NUM_THREADS, sMemSize, stream>>>(
-        M, N, K, const_cast<__half*>(C), v5_tma_map_A, v5_tma_map_B);
+    kernel<<<V6_NUM_SM, V6_NUM_THREADS, sMemSize, stream>>>(
+        M, N, K, const_cast<__half*>(C), v6_tma_map_A, v6_tma_map_B);
 }
 
 } // namespace baseline

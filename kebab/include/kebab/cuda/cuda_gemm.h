@@ -7,6 +7,8 @@
 
 namespace baseline {
 
+const char* gemm_cuda_version_feature_name(int version);
+
 /**
  * @brief CUDA baseline GEMM with version dispatch
  *
@@ -38,9 +40,9 @@ void gemm(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C, int 
  * @brief V1: Warp Tiling kernel (RC mode)
  * A: row-major, B: column-major, C: column-major
  */
-void gemm_v1_warptiling_fp16(const __half* A, const __half* B, __half* C,
-                              int M, int N, int K, char lhs_format, char rhs_format,
-                              cudaStream_t stream);
+void gemm_v1_warptiling_fp16_baseline(const __half* A, const __half* B, __half* C,
+                                      int M, int N, int K, char lhs_format, char rhs_format,
+                                      cudaStream_t stream);
 
 /**
  * @brief V2: WGMMA + TMA kernel (RC and RR modes, SM90 Hopper required)
@@ -67,9 +69,9 @@ void gemm_v2_wgmma_tma(const T* A, const T* B, T* C,
  * Uses larger 128x128x64 tiles
  * Uses WGMMA 64xNx16 with full N dimension per WGMMA
  */
-void gemm_v3_warpgroup_fp16(const __half* A, const __half* B, __half* C,
-                            int M, int N, int K, char lhs_format, char rhs_format,
-                            cudaStream_t stream);
+void gemm_v3_wgmma_tma_warpgroup_fp16(const __half* A, const __half* B, __half* C,
+                                      int M, int N, int K, char lhs_format, char rhs_format,
+                                      cudaStream_t stream);
 
 /**
  * @brief V4: Warp Specialization kernel with multi-stage pipeline (RC mode, SM90 Hopper required)
@@ -77,92 +79,141 @@ void gemm_v3_warpgroup_fp16(const __half* A, const __half* B, __half* C,
  * Producer-Consumer pattern: warp-group 0 does TMA loads, warp-group 1 does WGMMA compute
  * 5-stage pipeline with full/empty barriers
  */
-void gemm_v4_warpspec_fp16(const __half* A, const __half* B, __half* C,
-                           int M, int N, int K, char lhs_format, char rhs_format,
-                           cudaStream_t stream);
+void gemm_v4_wgmma_tma_warpgroup_warpspecialized_fp16(const __half* A, const __half* B, __half* C,
+                                                       int M, int N, int K, char lhs_format, char rhs_format,
+                                                       cudaStream_t stream);
 
 /**
  * @brief V5: Larger tiles + register optimization (RC mode, SM90 Hopper required)
  * 128×256×64 tiles, 3 warp-groups (1 producer + 2 consumers), dynamic register allocation
  */
-void gemm_v5_persistent_fp16(const __half* A, const __half* B, __half* C,
-                             int M, int N, int K, char lhs_format, char rhs_format,
-                             cudaStream_t stream);
+void gemm_v5_wgmma_tma_warpgroup_warpspecialized_persistent_fp16(const __half* A, const __half* B, __half* C,
+                                                                  int M, int N, int K, char lhs_format, char rhs_format,
+                                                                  cudaStream_t stream);
 
 /**
  * @brief V6: Persistent kernel + tile scheduling (RC mode, SM90 Hopper required)
  * 128×256×64 tiles, grid-constant TMA, 16×8 tile schedule pattern
  */
-void gemm_v6_persistent_tiling_fp16(const __half* A, const __half* B, __half* C,
-                                     int M, int N, int K, char lhs_format, char rhs_format,
-                                     cudaStream_t stream);
+void gemm_v6_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_fp16(const __half* A, const __half* B, __half* C,
+                                                                                 int M, int N, int K, char lhs_format, char rhs_format,
+                                                                                 cudaStream_t stream);
 
 /**
  * @brief V7: PTX barriers + 5D TMA (RC mode, SM90 Hopper required)
  * 128×256×64 tiles, mbarrier instructions, cluster-based async copy
  */
-void gemm_v7_ptxbarrier_5dtma_fp16(const __half* A, const __half* B, __half* C,
-                                    int M, int N, int K, char lhs_format, char rhs_format,
-                                    cudaStream_t stream);
+void gemm_v7_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d_fp16(const __half* A, const __half* B, __half* C,
+                                                                                                  int M, int N, int K, char lhs_format, char rhs_format,
+                                                                                                  cudaStream_t stream);
 
 /**
  * @brief V8: Thread Block Clusters + TMA Multicast (RC mode, SM90 Hopper required)
  * 128×256×64 tiles, CLUSTER_M=2, CLUSTER_N=1, multicast for shared memory broadcast
  */
-void gemm_v8_cluster_multicast_fp16(const __half* A, const __half* B, __half* C,
-                                     int M, int N, int K, char lhs_format, char rhs_format,
-                                     cudaStream_t stream);
+void gemm_v8_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d_cluster_multicast_fp16(
+    const __half* A, const __half* B, __half* C,
+    int M, int N, int K, char lhs_format, char rhs_format,
+    cudaStream_t stream);
 
 /**
  * @brief V9: Streaming Stores + Clusters + TMA Multicast (RC mode, SM90 Hopper required)
  * Same as V8 but with __stwt streaming stores for output (bypasses L2 cache)
  */
-void gemm_v9_streamstore_fp16(const __half* A, const __half* B, __half* C,
-                              int M, int N, int K, char lhs_format, char rhs_format,
-                              cudaStream_t stream);
+void gemm_v9_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d_cluster_multicast_streamstore_fp16(
+    const __half* A, const __half* B, __half* C,
+    int M, int N, int K, char lhs_format, char rhs_format,
+    cudaStream_t stream);
 
 /**
  * @brief V10: TMA Async Stores + Clusters + TMA Multicast (RC mode, SM90 Hopper required)
  * Uses TMA async stores (cp.async.bulk.tensor.global.shared) for output
  */
-void gemm_v10_tmastore_fp16(const __half* A, const __half* B, __half* C,
-                            int M, int N, int K, char lhs_format, char rhs_format,
-                            cudaStream_t stream);
+void gemm_v10_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d_cluster_multicast_tmastore_fp16(
+    const __half* A, const __half* B, __half* C,
+    int M, int N, int K, char lhs_format, char rhs_format,
+    cudaStream_t stream);
 
 /**
  * @brief V11: Hilbert Curve Scheduling + TMA Stores (RC mode, SM90 Hopper required)
  * Uses Hilbert curve for tile scheduling to improve L2 cache locality
  */
-void gemm_v11_hilbert_fp16(const __half* A, const __half* B, __half* C,
-                           int M, int N, int K, char lhs_format, char rhs_format,
-                           cudaStream_t stream);
+void gemm_v11_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d_cluster_multicast_tmastore_hilbert_fp16(
+    const __half* A, const __half* B, __half* C,
+    int M, int N, int K, char lhs_format, char rhs_format,
+    cudaStream_t stream);
 
 /**
  * @brief V12: stmatrix + Padded TMA Stores (RC mode, SM90 Hopper required)
  * Uses stmatrix instruction for efficient shared memory stores with padding
  */
-void gemm_v12_stmatrix_fp16(const __half* A, const __half* B, __half* C,
-                            int M, int N, int K, char lhs_format, char rhs_format,
-                            cudaStream_t stream);
+void gemm_v12_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d_cluster_multicast_tmastore_hilbert_stmatrix_padded_fp16(
+    const __half* A, const __half* B, __half* C,
+    int M, int N, int K, char lhs_format, char rhs_format,
+    cudaStream_t stream);
+
+/**
+ * @brief V13: PTX barriers + 2D TMA (RC mode, SM90 Hopper required)
+ * V7 synchronization path with V6-style 2D TMA addressing/instructions
+ */
+void gemm_v13_wgmma_tma_warpspecialized_persistent_tilescheduler_ptxbarrier_tma2d_fp16(const __half* A, const __half* B, __half* C,
+                                                                                         int M, int N, int K, char lhs_format, char rhs_format,
+                                                                                         cudaStream_t stream);
+
+/**
+ * @brief V14: stmatrix + Padded TMA without cluster/multicast (RC mode, SM90 Hopper required)
+ * De-clustered variant of V12 to remove V8-introduced cluster features.
+ */
+void gemm_v14_wgmma_tma_warpspecialized_persistent_ptxbarrier_tmastore_hilbert_stmatrix_padded_nocluster_fp16(
+    const __half* A, const __half* B, __half* C,
+    int M, int N, int K, char lhs_format, char rhs_format,
+    cudaStream_t stream);
+
+/**
+ * @brief V15: stmatrix + Padded TMA without cluster and without persistent scheduling
+ * De-clustered V12 variant with one-block-per-tile scheduling.
+ */
+void gemm_v15_wgmma_tma_warpspecialized_ptxbarrier_tmastore_hilbert_stmatrix_padded_nocluster_nopersistent_fp16(
+    const __half* A, const __half* B, __half* C,
+    int M, int N, int K, char lhs_format, char rhs_format,
+    cudaStream_t stream);
+
+/**
+ * @brief V16: stmatrix + Padded TMA, no cluster, linear persistent schedule
+ * Keeps V14 compute path but replaces Hilbert scheduling with linear static mapping.
+ */
+void gemm_v16_wgmma_tma_warpspecialized_persistent_ptxbarrier_tmastore_hilbert_stmatrix_padded_nocluster_linearschedule_fp16(
+    const __half* A, const __half* B, __half* C,
+    int M, int N, int K, char lhs_format, char rhs_format,
+    cudaStream_t stream);
+
+/**
+ * @brief V17: V3 warpgroup kernel + PTX mbarrier synchronization (RC mode, SM90 Hopper required)
+ * Isolates PTX barrier effect in single-warpgroup conventional scheduling.
+ */
+void gemm_v17_wgmma_tma_warpgroup_ptxbarrier_fp16(const __half* A, const __half* B, __half* C,
+                                                  int M, int N, int K, char lhs_format, char rhs_format,
+                                                  cudaStream_t stream);
 
 // ============================================================================
 // BFloat16 kernel declarations (bf16 input/output, FP32 accumulation)
 // ============================================================================
 
-void gemm_v1_warptiling_bf16(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
-                              int M, int N, int K, char lhs_format, char rhs_format,
-                              cudaStream_t stream);
+void gemm_v1_warptiling_bf16_baseline(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
+                                      int M, int N, int K, char lhs_format, char rhs_format,
+                                      cudaStream_t stream);
 
-void gemm_v3_warpgroup_bf16(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
-                            int M, int N, int K, char lhs_format, char rhs_format,
-                            cudaStream_t stream);
+void gemm_v3_wgmma_tma_warpgroup_bf16(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
+                                      int M, int N, int K, char lhs_format, char rhs_format,
+                                      cudaStream_t stream);
 
 // void gemm_v11_hilbert_bf16(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
 //                            int M, int N, int K, char lhs_format, char rhs_format,
 //                            cudaStream_t stream);
 
-void gemm_v12_stmatrix_bf16(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
-                            int M, int N, int K, char lhs_format, char rhs_format,
-                            cudaStream_t stream);
+void gemm_v12_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d_cluster_multicast_tmastore_hilbert_stmatrix_padded_bf16(
+    const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
+    int M, int N, int K, char lhs_format, char rhs_format,
+    cudaStream_t stream);
 
 } // namespace baseline

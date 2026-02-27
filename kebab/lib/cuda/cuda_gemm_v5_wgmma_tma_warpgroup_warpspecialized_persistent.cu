@@ -1,5 +1,5 @@
 /**
- * @file cuda_gemm_v5_persistent.cu
+ * @file cuda_gemm_v5_wgmma_tma_warpgroup_warpspecialized_persistent.cu
  * @brief CUDA V5 GEMM with larger tiles and register optimization (based on fast.cu kernel 5)
  *
  * Key features:

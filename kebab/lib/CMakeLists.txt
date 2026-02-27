@@ -9,18 +9,23 @@ target_link_libraries(kebab_common yaml-cpp)
 add_library(kebab_cuda
     cuda/cuda_elementwise_add.cu
     cuda/cuda_gemm.cu
-    cuda/cuda_gemm_v1_warptiling.cu
+    cuda/cuda_gemm_v1_warptiling_baseline.cu
     cuda/cuda_gemm_v2_wgmma_tma.cu
-    cuda/cuda_gemm_v3_warpgroup.cu
-    cuda/cuda_gemm_v4_warpspec.cu
-    cuda/cuda_gemm_v5_persistent.cu
-    cuda/cuda_gemm_v6_persistent_tiling.cu
-    cuda/cuda_gemm_v7_ptxbarrier_5dtma.cu
-    cuda/cuda_gemm_v8_cluster_multicast.cu
-    cuda/cuda_gemm_v9_streamstore.cu
-    cuda/cuda_gemm_v10_tmastore.cu
-    cuda/cuda_gemm_v11_hilbert.cu
-    cuda/cuda_gemm_v12_stmatrix.cu
+    cuda/cuda_gemm_v3_wgmma_tma_warpgroup.cu
+    cuda/cuda_gemm_v4_wgmma_tma_warpgroup_warpspecialized.cu
+    cuda/cuda_gemm_v5_wgmma_tma_warpgroup_warpspecialized_persistent.cu
+    cuda/cuda_gemm_v6_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler.cu
+    cuda/cuda_gemm_v7_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d.cu
+    cuda/cuda_gemm_v8_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d_cluster_multicast.cu
+    cuda/cuda_gemm_v9_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d_cluster_multicast_streamstore.cu
+    cuda/cuda_gemm_v10_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d_cluster_multicast_tmastore.cu
+    cuda/cuda_gemm_v11_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d_cluster_multicast_tmastore_hilbert.cu
+    cuda/cuda_gemm_v12_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d_cluster_multicast_tmastore_hilbert_stmatrix_padded.cu
+    cuda/cuda_gemm_v13_wgmma_tma_warpspecialized_persistent_tilescheduler_ptxbarrier_tma2d.cu
+    cuda/cuda_gemm_v14_wgmma_tma_warpspecialized_persistent_ptxbarrier_tmastore_hilbert_stmatrix_padded_nocluster.cu
+    cuda/cuda_gemm_v15_wgmma_tma_warpspecialized_ptxbarrier_tmastore_hilbert_stmatrix_padded_nocluster_nopersistent.cu
+    cuda/cuda_gemm_v16_wgmma_tma_warpspecialized_persistent_ptxbarrier_tmastore_hilbert_stmatrix_padded_nocluster_linearschedule.cu
+    cuda/cuda_gemm_v17_wgmma_tma_warpgroup_ptxbarrier.cu
 )
 target_include_directories(kebab_cuda PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(kebab_cuda CUDA::cublas CUDA::cuda_driver)

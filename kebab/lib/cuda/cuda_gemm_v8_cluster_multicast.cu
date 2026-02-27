@@ -265,7 +265,11 @@ constexpr int V8_NUM_THREADS = 384;
 constexpr int V8_QSIZE = 3;
 constexpr int V8_NUM_SM = 128;
 constexpr int V8_CLUSTER_M = 2;
-constexpr int V8_CLUSTER_N = 1;
+constexpr int V8_CLUSTER_N = 2;
+
+static_assert((V8_CLUSTER_M * V8_CLUSTER_N) > 0, "V8 cluster size must be positive");
+static_assert((V8_NUM_SM % (V8_CLUSTER_M * V8_CLUSTER_N)) == 0,
+              "V8_NUM_SM must be divisible by cluster size");
 
 template <int BM, int BN, int BK, int QSIZE>
 struct SMemV8 {
@@ -355,7 +359,7 @@ gemm_v8_multicast_kernel(int M, int N, int K, __half* C,
             int qidx = 0;
             uint32_t col_mask = 0;
             for (int i = 0; i < CLUSTER_M; ++i) {
-                col_mask |= (1 << (i * CLUSTER_N));
+                col_mask |= (1u << (i * CLUSTER_N + rank_n));
             }
             int num_block_m, num_block_n;
             while (schedule.next(num_block_m, num_block_n)) {
@@ -368,7 +372,7 @@ gemm_v8_multicast_kernel(int M, int N, int K, __half* C,
 
                     expect_bytes_v8(&full[qidx], (BK * BN + BK * BM) * sizeof(__half));
                     if constexpr (CLUSTER_N > 1) {
-                        uint32_t mask = ((1 << CLUSTER_N) - 1) << (rank_m * CLUSTER_N);
+                        uint32_t mask = ((1u << CLUSTER_N) - 1u) << (rank_m * CLUSTER_N);
                         if (rank_n == 0) {
                             load_async_multicast_v8(&sA[qidx * BK * BM], &tensorMapA, &full[qidx],
                                                     block_k_iter * BK, num_block_m * BM, mask);
@@ -469,9 +473,10 @@ static CUtensorMap v8_tma_map_A;
 static CUtensorMap v8_tma_map_B;
 static int v8_prev_m = 0, v8_prev_n = 0, v8_prev_k = 0;
 
-void gemm_v8_cluster_multicast_fp16(const __half* A, const __half* B, __half* C,
-                                     int M, int N, int K, char lhs_format, char rhs_format,
-                                     cudaStream_t stream) {
+void gemm_v8_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d_cluster_multicast_fp16(
+    const __half* A, const __half* B, __half* C,
+    int M, int N, int K, char lhs_format, char rhs_format,
+    cudaStream_t stream) {
     if (lhs_format != 'R' || rhs_format != 'C') {
         fprintf(stderr, "ERROR: CUDA V8 only supports RC mode\n");
         return;
@@ -480,7 +485,8 @@ void gemm_v8_cluster_multicast_fp16(const __half* A, const __half* B, __half* C,
     constexpr int CLUSTER_BM = V8_BM * V8_CLUSTER_M;
     constexpr int CLUSTER_BN = V8_BN * V8_CLUSTER_N;
     if (M % CLUSTER_BM != 0 || N % CLUSTER_BN != 0 || K % V8_BK != 0) {
-        fprintf(stderr, "ERROR: CUDA V8 requires M%%256==0, N%%256==0, K%%64==0\n");
+        fprintf(stderr, "ERROR: CUDA V8 requires M%%%d==0, N%%%d==0, K%%%d==0\n",
+                CLUSTER_BM, CLUSTER_BN, V8_BK);
         return;
     }
 

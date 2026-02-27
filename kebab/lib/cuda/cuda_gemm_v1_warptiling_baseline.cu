@@ -1,5 +1,5 @@
 /**
- * @file cuda_gemm_v1_warptiling.cu
+ * @file cuda_gemm_v1_warptiling_baseline.cu
  * @brief CUDA V1 GEMM using Warp Tiling (based on fast.cu kernel 1)
  *
  * Hierarchical tiling architecture:

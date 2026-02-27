@@ -456,9 +456,10 @@ static CUtensorMap v9_tma_map_A;
 static CUtensorMap v9_tma_map_B;
 static int v9_prev_m = 0, v9_prev_n = 0, v9_prev_k = 0;
 
-void gemm_v9_streamstore_fp16(const __half* A, const __half* B, __half* C,
-                              int M, int N, int K, char lhs_format, char rhs_format,
-                              cudaStream_t stream) {
+void gemm_v9_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d_cluster_multicast_streamstore_fp16(
+    const __half* A, const __half* B, __half* C,
+    int M, int N, int K, char lhs_format, char rhs_format,
+    cudaStream_t stream) {
     if (lhs_format != 'R' || rhs_format != 'C') {
         fprintf(stderr, "ERROR: CUDA V9 only supports RC mode\n");
         return;

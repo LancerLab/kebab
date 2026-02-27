@@ -1,5 +1,5 @@
 /**
- * @file cuda_gemm_v12_stmatrix.cu
+ * @file cuda_gemm_v12_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d_cluster_multicast_tmastore_hilbert_stmatrix_padded.cu
  * @brief CUDA V12 GEMM with stmatrix + Padded TMA (based on fast.cu kernel 12)
  *
  * Key features:

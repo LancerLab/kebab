@@ -4,7 +4,7 @@
  *
  * This file provides the public GEMM interface and dispatches to
  * specific kernel implementations based on version:
- *   - V1: Warp Tiling (cuda_gemm_v1_warptiling.cu)
+ *   - V1: Warp Tiling (cuda_gemm_v1_warptiling_baseline.cu)
  *   - V2: WGMMA + TMA (future)
  */
 
@@ -18,6 +18,29 @@
 #include <cctype>
 
 namespace baseline {
+
+const char* gemm_cuda_version_feature_name(int version) {
+    switch (version) {
+        case 1:  return "warptiling_baseline";
+        case 2:  return "wgmma_tma";
+        case 3:  return "wgmma_tma_warpgroup";
+        case 4:  return "wgmma_tma_warpgroup_warpspecialized";
+        case 5:  return "wgmma_tma_warpgroup_warpspecialized_persistent";
+        case 6:  return "wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler";
+        case 7:  return "wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d";
+        case 8:  return "wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d_cluster_multicast";
+        case 9:  return "wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d_cluster_multicast_streamstore";
+        case 10: return "wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d_cluster_multicast_tmastore";
+        case 11: return "wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d_cluster_multicast_tmastore_hilbert";
+        case 12: return "wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d_cluster_multicast_tmastore_hilbert_stmatrix_padded";
+        case 13: return "wgmma_tma_warpspecialized_persistent_tilescheduler_ptxbarrier_tma2d";
+        case 14: return "wgmma_tma_warpspecialized_persistent_ptxbarrier_tmastore_hilbert_stmatrix_padded_nocluster";
+        case 15: return "wgmma_tma_warpspecialized_ptxbarrier_tmastore_hilbert_stmatrix_padded_nocluster_nopersistent";
+        case 16: return "wgmma_tma_warpspecialized_persistent_ptxbarrier_tmastore_hilbert_stmatrix_padded_nocluster_linearschedule";
+        case 17: return "wgmma_tma_warpgroup_ptxbarrier";
+        default: return "unknown";
+    }
+}
 
 // ============================================================================
 // FP16 GEMM Dispatch
@@ -46,7 +69,7 @@ void gemm(const __half* A, const __half* B, __half* C,
     switch (version) {
         case 1:
             // V1: Warp Tiling (RC mode only)
-            gemm_v1_warptiling_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            gemm_v1_warptiling_fp16_baseline(A, B, C, M, N, K, lhs_format, rhs_format, stream);
             break;
         case 2:
             // V2: WGMMA + TMA (SM90 Hopper, RC mode only)
@@ -56,47 +79,67 @@ void gemm(const __half* A, const __half* B, __half* C,
             break;
         case 3:
             // V3: Warp Group with larger tiles (SM90 Hopper, RC mode only)
-            gemm_v3_warpgroup_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            gemm_v3_wgmma_tma_warpgroup_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
             break;
         case 4:
             // V4: Warp Specialization with multi-stage pipeline (SM90 Hopper, RC mode only)
-            gemm_v4_warpspec_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            gemm_v4_wgmma_tma_warpgroup_warpspecialized_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
             break;
         case 5:
             // V5: Larger tiles + register optimization (SM90 Hopper, RC mode only)
-            gemm_v5_persistent_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            gemm_v5_wgmma_tma_warpgroup_warpspecialized_persistent_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
             break;
         case 6:
             // V6: Persistent kernel + tile scheduling (SM90 Hopper, RC mode only)
-            gemm_v6_persistent_tiling_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            gemm_v6_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
             break;
         case 7:
             // V7: PTX barriers + 5D TMA (SM90 Hopper, RC mode only)
-            gemm_v7_ptxbarrier_5dtma_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            gemm_v7_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
             break;
         case 8:
             // V8: Thread Block Clusters + TMA Multicast (SM90 Hopper, RC mode only)
-            gemm_v8_cluster_multicast_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            gemm_v8_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d_cluster_multicast_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
             break;
         case 9:
             // V9: Streaming Stores + Clusters + TMA Multicast (SM90 Hopper, RC mode only)
-            gemm_v9_streamstore_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            gemm_v9_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d_cluster_multicast_streamstore_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
             break;
         case 10:
             // V10: TMA Async Stores + Clusters + TMA Multicast (SM90 Hopper, RC mode only)
-            gemm_v10_tmastore_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            gemm_v10_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d_cluster_multicast_tmastore_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
             break;
         case 11:
             // V11: Hilbert Curve Scheduling + TMA Stores (SM90 Hopper, RC mode only)
-            gemm_v11_hilbert_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            gemm_v11_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d_cluster_multicast_tmastore_hilbert_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
             break;
         case 12:
             // V12: stmatrix + Padded TMA Stores (SM90 Hopper, RC mode only)
-            gemm_v12_stmatrix_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            gemm_v12_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d_cluster_multicast_tmastore_hilbert_stmatrix_padded_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            break;
+        case 13:
+            // V13: PTX barriers + 2D TMA (SM90 Hopper, RC mode only)
+            gemm_v13_wgmma_tma_warpspecialized_persistent_tilescheduler_ptxbarrier_tma2d_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            break;
+        case 14:
+            // V14: stmatrix + padded TMA, no cluster/multicast (SM90 Hopper, RC mode only)
+            gemm_v14_wgmma_tma_warpspecialized_persistent_ptxbarrier_tmastore_hilbert_stmatrix_padded_nocluster_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            break;
+        case 15:
+            // V15: stmatrix + padded TMA, no cluster and no persistent scheduling (SM90 Hopper, RC mode only)
+            gemm_v15_wgmma_tma_warpspecialized_ptxbarrier_tmastore_hilbert_stmatrix_padded_nocluster_nopersistent_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            break;
+        case 16:
+            // V16: stmatrix + padded TMA, no cluster, linear persistent scheduling (SM90 Hopper, RC mode only)
+            gemm_v16_wgmma_tma_warpspecialized_persistent_ptxbarrier_tmastore_hilbert_stmatrix_padded_nocluster_linearschedule_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            break;
+        case 17:
+            // V17: V3 warpgroup + PTX mbarrier sync (SM90 Hopper, RC mode only)
+            gemm_v17_wgmma_tma_warpgroup_ptxbarrier_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
             break;
         default:
             fprintf(stderr, "ERROR: Unsupported CUDA version %d\n", version);
-            fprintf(stderr, "       Available: 1-12\n");
+            fprintf(stderr, "       Available: 1-17\n");
             return;
     }
 }
@@ -140,7 +183,7 @@ void gemm(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
     // Version dispatch for BFloat16
     switch (version) {
         case 1:
-            gemm_v1_warptiling_bf16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            gemm_v1_warptiling_bf16_baseline(A, B, C, M, N, K, lhs_format, rhs_format, stream);
             break;
         case 2:
             // V2: WGMMA + TMA (SM90 Hopper, RC mode only)
@@ -149,13 +192,13 @@ void gemm(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
                 A, B, C, M, N, K, lhs_format, rhs_format, stream);
             break;
         case 3:
-            gemm_v3_warpgroup_bf16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            gemm_v3_wgmma_tma_warpgroup_bf16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
             break;
         // case 11:
         //     gemm_v11_hilbert_bf16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
         //     break;
         case 12:
-            gemm_v12_stmatrix_bf16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            gemm_v12_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxbarrier_tma5d_cluster_multicast_tmastore_hilbert_stmatrix_padded_bf16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
             break;
         default:
             fprintf(stderr, "ERROR: Unsupported CUDA version %d for bfloat16\n", version);

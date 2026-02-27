@@ -1,5 +1,5 @@
 /**
- * @file cuda_gemm_v4_warpspec.cu
+ * @file cuda_gemm_v4_wgmma_tma_warpgroup_warpspecialized.cu
  * @brief CUDA V4 GEMM using Warp Specialization + Multi-stage Pipeline (based on fast.cu kernel 4)
  *
  * Key features:

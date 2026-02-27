@@ -124,7 +124,7 @@ void benchmarkGEMM(const ConfigParser& config) {
     }
     std::cout << " | Versions: ";
     for (size_t i = 0; i < version_list.size(); ++i) {
-        std::cout << "v" << version_list[i];
+        std::cout << "v" << version_list[i] << "(" << baseline::gemm_cuda_version_feature_name(version_list[i]) << ")";
         if (i < version_list.size() - 1) std::cout << ", ";
     }
     std::cout << " | Modes: ";
@@ -284,7 +284,11 @@ void benchmarkGEMM(const ConfigParser& config) {
                         // Save to CSV
                         BenchmarkResult result;
                         result.operator_name = "GEMM";
-                        result.variant = impl + "_v" + std::to_string(version);
+                        if (impl == "cuda") {
+                            result.variant = impl + "_v" + std::to_string(version) + "_" + baseline::gemm_cuda_version_feature_name(version);
+                        } else {
+                            result.variant = impl + "_v" + std::to_string(version);
+                        }
                         result.batch_size = size;
                         result.latency_ms = latency;
                         result.throughput_gbps = tflops * 1000.0f;

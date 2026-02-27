@@ -1,5 +1,5 @@
 /**
- * @file cuda_gemm_v3_warpgroup.cu
+ * @file cuda_gemm_v3_wgmma_tma_warpgroup.cu
  * @brief CUDA V3 GEMM using Warp Groups + larger tiles (based on fast.cu kernel 3)
  *
  * This kernel uses:

@@ -342,9 +342,9 @@ static CUtensorMap v6_tma_map_A;
 static CUtensorMap v6_tma_map_B;
 static int v6_prev_m = 0, v6_prev_n = 0, v6_prev_k = 0;
 
-void gemm_v6_persistent_tiling_fp16(const __half* A, const __half* B, __half* C,
-                                     int M, int N, int K, char lhs_format, char rhs_format,
-                                     cudaStream_t stream) {
+void gemm_v6_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_fp16(const __half* A, const __half* B, __half* C,
+                                                                                 int M, int N, int K, char lhs_format, char rhs_format,
+                                                                                 cudaStream_t stream) {
     if (lhs_format != 'R' || rhs_format != 'C') {
         fprintf(stderr, "ERROR: CUDA V6 only supports RC mode\n");
         return;
