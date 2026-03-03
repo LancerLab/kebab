@@ -1,14 +1,16 @@
 /**
- * @file cuda_gemm_v4_wgmma_tma_warpgroup_warpspecialized.cu
- * @brief CUDA V4 GEMM using Warp Specialization + Multi-stage Pipeline (based on fast.cu kernel 4)
+ * @file cuda_gemm_v40_wgmma_tma_warpgroup_warpspecialized_eventfix.cu
+ * @brief CUDA V40 GEMM using Warp Specialization + Multi-stage Pipeline (event-count fix)
  *
  * Key features:
  * - Producer-Consumer warp specialization
  *   - Warp group 0: Producer (TMA loads only)
  *   - Warp groups 1+: Consumers (WGMMA compute only)
  * - Multi-stage pipeline (QSIZE=3) with full/empty barriers
- * - Larger tiles: 128×128×64
- * - WGMMA 64×128×16 (full N per WGMMA)
+ * - Event fix:
+ *   - full barrier expects producer thread only
+ *   - empty barrier expects consumer threads only
+ *   - waits are parity waits (no self-arrive)
  *
  * RC mode layout:
  * - A: M×K row-major -> loaded as col-major via TMA
@@ -21,9 +23,7 @@
 #include "kebab/cuda/cuda_gemm.h"
 #include <cuda_fp16.h>
 #include <cuda/barrier>
-#include <cuda/std/utility>
 #include <cstdio>
-#include <cassert>
 #include <cuda.h>
 #include <cuda_runtime.h>
 
@@ -32,46 +32,50 @@ namespace baseline {
 namespace cde = cuda::device::experimental;
 using barrier = cuda::barrier<cuda::thread_scope_block>;
 
-// ============================================================================
-// WGMMA Helper Functions (FP16 versions)
-// ============================================================================
-
-__device__ static inline uint64_t matrix_descriptor_encode_v4(uint64_t x) {
+__device__ static inline uint64_t matrix_descriptor_encode_v40(uint64_t x) {
     return (((x) & 0x3FFFF) >> 0x4);
 }
 
-// atuo smem_layout = ....
-// copy_atom = .Swizzle(3, 4, 3)();
-// 64 bit, 63-62, swizzle, 61-33, leading dim.. 
-__device__ uint64_t make_smem_desc_v4(__half* ptr) {
+__device__ uint64_t make_smem_desc_v40(__half* ptr) {
     uint32_t addr = static_cast<uint32_t>(__cvta_generic_to_shared(ptr));
     uint64_t desc = 0x0000000000000000;
-    desc |= matrix_descriptor_encode_v4(addr);
-    desc |= matrix_descriptor_encode_v4((uint64_t)16) << 16;
-    desc |= matrix_descriptor_encode_v4((uint64_t)1024) << 32;
-    desc |= 1llu << 62;  // 128B swizzle
+    desc |= matrix_descriptor_encode_v40(addr);
+    desc |= matrix_descriptor_encode_v40((uint64_t)16) << 16;
+    desc |= matrix_descriptor_encode_v40((uint64_t)1024) << 32;
+    desc |= 1llu << 62;
     return desc;
 }
 
-__device__ void warpgroup_arrive_v4() {
+__device__ void warpgroup_arrive_v40() {
     asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory");
 }
 
-__device__ void warpgroup_commit_batch_v4() {
+__device__ void warpgroup_commit_batch_v40() {
     asm volatile("wgmma.commit_group.sync.aligned;\n" ::: "memory");
 }
 
+__device__ __forceinline__ void barrier_wait_parity_v40(barrier* bar, int phase) {
+    uint32_t mbar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(bar));
+    asm volatile(
+        "{\n"
+        ".reg .pred P1;\n"
+        "LAB_WAIT:\n"
+        "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1;\n"
+        "@!P1 bra.uni LAB_WAIT;\n"
+        "}\n"
+        :: "r"(mbar_ptr), "r"(phase));
+}
+
 template <int N>
-__device__ void warpgroup_wait_v4() {
+__device__ void warpgroup_wait_v40() {
     static_assert(N >= 0 && N <= 7, "WGMMA wait: N must be in range [0, 7]");
     asm volatile("wgmma.wait_group.sync.aligned %0;\n" ::"n"(N) : "memory");
 }
 
-// WGMMA 64×128×16 for FP16
 template<int ScaleD, int ScaleA, int ScaleB, int TransA, int TransB>
-__device__ void wgmma128_v4(float d[8][8], __half* sA, __half* sB) {
-    uint64_t desc_a = make_smem_desc_v4(&sA[0]);
-    uint64_t desc_b = make_smem_desc_v4(&sB[0]);
+__device__ void wgmma128_v40(float d[8][8], __half* sA, __half* sB) {
+    uint64_t desc_a = make_smem_desc_v40(&sA[0]);
+    uint64_t desc_b = make_smem_desc_v40(&sB[0]);
     asm volatile(
         "{\n"
         "wgmma.mma_async.sync.aligned.m64n128k16.f32.f16.f16 "
@@ -108,13 +112,9 @@ __device__ void wgmma128_v4(float d[8][8], __half* sA, __half* sB) {
           "n"(int32_t(ScaleB)), "n"(int32_t(TransA)), "n"(int32_t(TransB)));
 }
 
-// ============================================================================
-// TMA Functions (reused from V3)
-// ============================================================================
-
 template <int BlockMajorSize, int BlockMinorSize>
-void create_tensor_map_v4(CUtensorMap *tma_map, __half* gmem_ptr,
-                          int blocks_height, int blocks_width) {
+void create_tensor_map_v40(CUtensorMap *tma_map, __half* gmem_ptr,
+                           int blocks_height, int blocks_width) {
     void* gmem_address = (void*)gmem_ptr;
     uint64_t gmem_prob_shape[5] = {
         (uint64_t)BlockMinorSize * blocks_width,
@@ -143,41 +143,32 @@ void create_tensor_map_v4(CUtensorMap *tma_map, __half* gmem_ptr,
 }
 
 template<int BlockMajorSize, int BlockMinorSize>
-static inline CUtensorMap* allocate_and_create_tensor_map_v4(
+static inline CUtensorMap* allocate_and_create_tensor_map_v40(
     __half* src, int blocks_height, int blocks_width) {
     CUtensorMap *tma_map_d;
     cudaMalloc(&tma_map_d, sizeof(CUtensorMap));
     CUtensorMap tma_map_host;
-    create_tensor_map_v4<BlockMajorSize, BlockMinorSize>(
+    create_tensor_map_v40<BlockMajorSize, BlockMinorSize>(
         &tma_map_host, src, blocks_height, blocks_width);
     cudaMemcpy(tma_map_d, &tma_map_host, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
     return tma_map_d;
 }
 
-// ============================================================================
-// V4 Kernel Configuration
-// ============================================================================
+constexpr int V40_BM = 64;
+constexpr int V40_BN = 128;
+constexpr int V40_BK = 64;
+constexpr int V40_NUM_THREADS = 256;
+constexpr int V40_QSIZE = 3;
 
-constexpr int V4_BM = 64;
-constexpr int V4_BN = 128;
-constexpr int V4_BK = 64;
-constexpr int V4_NUM_THREADS = 256;  // 2 warp-groups: 1 producer + 1 consumer
-constexpr int V4_QSIZE = 1;          // Pipeline depth
-
-// Shared memory structure with pipeline stages
 template <int BM, int BN, int BK, int QSIZE>
-struct SMemV4 {
+struct SMemV40 {
     alignas(128) __half A[BM * BK * QSIZE];
     alignas(128) __half B[BK * BN * QSIZE];
 };
 
-// ============================================================================
-// V4 Kernel: Warp Specialization with Producer-Consumer Pattern
-// ============================================================================
-
 template<int BM, int BN, int BK, int NUM_THREADS, int QSIZE>
 __global__ void __launch_bounds__(NUM_THREADS)
-gemm_v4_warpspec_kernel(int M, int N, int K, __half* C,
+gemm_v40_warpspec_kernel(int M, int N, int K, __half* C,
                          const CUtensorMap* tensorMapA,
                          const CUtensorMap* tensorMapB) {
     constexpr int WGMMA_M = 64, WGMMA_K = 16, WGMMA_N = BN;
@@ -185,11 +176,10 @@ gemm_v4_warpspec_kernel(int M, int N, int K, __half* C,
     constexpr int B_WG_M = BM / num_consumers;
 
     extern __shared__ __align__(128) uint8_t smem[];
-    SMemV4<BM, BN, BK, QSIZE> &s = *reinterpret_cast<SMemV4<BM, BN, BK, QSIZE>*>(smem);
+    SMemV40<BM, BN, BK, QSIZE> &s = *reinterpret_cast<SMemV40<BM, BN, BK, QSIZE>*>(smem);
     __half *sA = s.A;
     __half *sB = s.B;
 
-    // Barriers for producer-consumer synchronization
     #pragma nv_diag_suppress static_var_with_dynamic_init
     __shared__ barrier full[QSIZE], empty[QSIZE];
 
@@ -199,23 +189,23 @@ gemm_v4_warpspec_kernel(int M, int N, int K, __half* C,
     int wg_idx = threadIdx.x / 128;
     int tid = threadIdx.x % 128;
 
-    // Initialize barriers
     if (threadIdx.x == 0) {
         for (int i = 0; i < QSIZE; ++i) {
-            init(&full[i], num_consumers * 128 + 1);
-            init(&empty[i], num_consumers * 128 + 1);
+            init(&full[i], 1);
+            init(&empty[i], num_consumers * 128);
         }
         cde::fence_proxy_async_shared_cta();
     }
     __syncthreads();
 
-    // Warp group 0: Producer (TMA loads only)
     if (wg_idx == 0) {
         if (tid == 0) {
             int qidx = 0;
+            int empty_phase[QSIZE] = {0};
             for (int block_k_iter = 0; block_k_iter < num_blocks_k; ++block_k_iter, ++qidx) {
                 if (qidx == QSIZE) qidx = 0;
-                empty[qidx].wait(empty[qidx].arrive());
+                barrier_wait_parity_v40(&empty[qidx], empty_phase[qidx]);
+                empty_phase[qidx] ^= 1;
                 cde::cp_async_bulk_tensor_2d_global_to_shared(
                     &sA[qidx * BK * BM], tensorMapA, block_k_iter * BK, num_block_m * BM, full[qidx]);
                 cde::cp_async_bulk_tensor_2d_global_to_shared(
@@ -224,10 +214,7 @@ gemm_v4_warpspec_kernel(int M, int N, int K, __half* C,
                     full[qidx], 1, (BK * BN + BK * BM) * sizeof(__half));
             }
         }
-    }
-    // Warp groups 1+: Consumers (WGMMA compute only)
-    else {
-        // Signal empty barriers initially
+    } else {
         for (int i = 0; i < QSIZE; ++i) {
             barrier::arrival_token _ = empty[i].arrive();
         }
@@ -236,26 +223,27 @@ gemm_v4_warpspec_kernel(int M, int N, int K, __half* C,
         memset(d, 0, sizeof(d));
 
         int qidx = 0;
+        int full_phase[QSIZE] = {0};
         for (int block_k_iter = 0; block_k_iter < num_blocks_k; ++block_k_iter, ++qidx) {
             if (qidx == QSIZE) qidx = 0;
-            full[qidx].wait(full[qidx].arrive());
+            barrier_wait_parity_v40(&full[qidx], full_phase[qidx]);
+            full_phase[qidx] ^= 1;
 
-            warpgroup_arrive_v4();
+            warpgroup_arrive_v40();
             #pragma unroll
             for (int m_it = 0; m_it < B_WG_M / WGMMA_M; ++m_it) {
                 __half *wgmma_sA = sA + qidx * BK * BM + BK * m_it * WGMMA_M;
                 #pragma unroll
                 for (int k_it = 0; k_it < BK / WGMMA_K; ++k_it) {
-                    wgmma128_v4<1, 1, 1, 0, 0>(
+                    wgmma128_v40<1, 1, 1, 0, 0>(
                         d[m_it], &wgmma_sA[k_it * WGMMA_K], &sB[qidx * BK * BN + k_it * WGMMA_K]);
                 }
             }
-            warpgroup_commit_batch_v4();
-            warpgroup_wait_v4<0>();
+            warpgroup_commit_batch_v40();
+            warpgroup_wait_v40<0>();
             barrier::arrival_token _ = empty[qidx].arrive();
         }
 
-        // Store results to global memory (column-major C)
         tid = threadIdx.x % 128;
         int lane = tid % 32;
         int warp = tid / 32;
@@ -285,53 +273,47 @@ gemm_v4_warpspec_kernel(int M, int N, int K, __half* C,
     }
 }
 
-// ============================================================================
-// Host Function
-// ============================================================================
+static CUtensorMap *v40_tma_map_A = nullptr;
+static CUtensorMap *v40_tma_map_B = nullptr;
+static int v40_prev_m = 0, v40_prev_n = 0, v40_prev_k = 0;
 
-static CUtensorMap *v4_tma_map_A = nullptr;
-static CUtensorMap *v4_tma_map_B = nullptr;
-static int v4_prev_m = 0, v4_prev_n = 0, v4_prev_k = 0;
-
-void gemm_v4_wgmma_tma_warpgroup_warpspecialized_fp16(const __half* A, const __half* B, __half* C,
-                                                       int M, int N, int K, char lhs_format, char rhs_format,
-                                                       cudaStream_t stream) {
+void gemm_v40_wgmma_tma_warpgroup_warpspecialized_eventfix_fp16(
+    const __half* A, const __half* B, __half* C,
+    int M, int N, int K, char lhs_format, char rhs_format,
+    cudaStream_t stream) {
     if (lhs_format != 'R' || rhs_format != 'C') {
-        fprintf(stderr, "ERROR: CUDA V4 (warp spec) only supports RC mode\n");
+        fprintf(stderr, "ERROR: CUDA V40 (warp spec event fix) only supports RC mode\n");
         return;
     }
 
-    // Check alignment requirements
-    if (M % V4_BM != 0 || N % V4_BN != 0 || K % V4_BK != 0) {
-        fprintf(stderr, "ERROR: CUDA V4 requires M,N to be multiples of 128, K multiple of 64\n");
+    if (M % V40_BM != 0 || N % V40_BN != 0 || K % V40_BK != 0) {
+        fprintf(stderr, "ERROR: CUDA V40 requires M,N to be multiples of 128, K multiple of 64\n");
         fprintf(stderr, "       Got: M=%d, N=%d, K=%d\n", M, N, K);
         return;
     }
 
-    // Create or update TMA maps if dimensions changed
-    if (!v4_tma_map_A || M != v4_prev_m || N != v4_prev_n || K != v4_prev_k) {
-        if (v4_tma_map_A) cudaFree(v4_tma_map_A);
-        if (v4_tma_map_B) cudaFree(v4_tma_map_B);
+    if (!v40_tma_map_A || M != v40_prev_m || N != v40_prev_n || K != v40_prev_k) {
+        if (v40_tma_map_A) cudaFree(v40_tma_map_A);
+        if (v40_tma_map_B) cudaFree(v40_tma_map_B);
 
-        v4_tma_map_A = allocate_and_create_tensor_map_v4<V4_BM, V4_BK>(
-            const_cast<__half*>(A), M / V4_BM, K / V4_BK);
-        v4_tma_map_B = allocate_and_create_tensor_map_v4<V4_BN, V4_BK>(
-            const_cast<__half*>(B), N / V4_BN, K / V4_BK);
+        v40_tma_map_A = allocate_and_create_tensor_map_v40<V40_BM, V40_BK>(
+            const_cast<__half*>(A), M / V40_BM, K / V40_BK);
+        v40_tma_map_B = allocate_and_create_tensor_map_v40<V40_BN, V40_BK>(
+            const_cast<__half*>(B), N / V40_BN, K / V40_BK);
 
-        v4_prev_m = M;
-        v4_prev_n = N;
-        v4_prev_k = K;
+        v40_prev_m = M;
+        v40_prev_n = N;
+        v40_prev_k = K;
     }
 
-    size_t sMemSize = sizeof(SMemV4<V4_BM, V4_BN, V4_BK, V4_QSIZE>);
-    auto kernel = gemm_v4_warpspec_kernel<V4_BM, V4_BN, V4_BK, V4_NUM_THREADS, V4_QSIZE>;
+    size_t sMemSize = sizeof(SMemV40<V40_BM, V40_BN, V40_BK, V40_QSIZE>);
+    auto kernel = gemm_v40_warpspec_kernel<V40_BM, V40_BN, V40_BK, V40_NUM_THREADS, V40_QSIZE>;
 
     cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, sMemSize);
 
-    dim3 grid((M / V4_BM) * (N / V4_BN));
-    kernel<<<grid, V4_NUM_THREADS, sMemSize, stream>>>(
-        M, N, K, const_cast<__half*>(C), v4_tma_map_A, v4_tma_map_B);
+    dim3 grid((M / V40_BM) * (N / V40_BN));
+    kernel<<<grid, V40_NUM_THREADS, sMemSize, stream>>>(
+        M, N, K, const_cast<__half*>(C), v40_tma_map_A, v40_tma_map_B);
 }
 
 } // namespace baseline
-

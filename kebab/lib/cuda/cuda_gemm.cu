@@ -100,6 +100,7 @@ const char* gemm_cuda_version_feature_name(int version) {
         case 18: return "wgmma_tma_warpgroup_warpspecialized_persistent_stmatrix";
         case 19: return "wgmma_tma_warpgroup_warpspecialized_persistent_hilbert";
         case 20: return "decomposition_heuristic_v15_v19";
+        case 40: return "wgmma_tma_warpgroup_warpspecialized_eventfix";
         default: return "unknown";
     }
 }
@@ -227,9 +228,13 @@ void gemm(const __half* A, const __half* B, __half* C,
             }
             break;
         }
+        case 40:
+            // V40: V4 event-count fix with parity waits (SM90 Hopper, RC mode only)
+            gemm_v40_wgmma_tma_warpgroup_warpspecialized_eventfix_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            break;
         default:
             fprintf(stderr, "ERROR: Unsupported CUDA version %d\n", version);
-            fprintf(stderr, "       Available: 1-20\n");
+            fprintf(stderr, "       Available: 1-20, 40\n");
             return;
     }
 }
