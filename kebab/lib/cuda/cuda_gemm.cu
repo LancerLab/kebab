@@ -16,8 +16,67 @@
 #include <string>
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 
 namespace baseline {
+
+namespace {
+
+enum class V20DecompositionMode {
+    DataParallel,
+    PersistentHilbert,
+    Heuristic,
+};
+
+V20DecompositionMode get_v20_mode() {
+    const char* env = std::getenv("KEBAB_V20_MODE");
+    if (env == nullptr) {
+        return V20DecompositionMode::Heuristic;
+    }
+    std::string mode(env);
+    std::transform(mode.begin(), mode.end(), mode.begin(),
+                   [](unsigned char c) { return std::toupper(c); });
+    if (mode == "DP" || mode == "DATAPARALLEL" || mode == "V15") {
+        return V20DecompositionMode::DataParallel;
+    }
+    if (mode == "PERSISTENT" || mode == "HILBERT" || mode == "V19") {
+        return V20DecompositionMode::PersistentHilbert;
+    }
+    return V20DecompositionMode::Heuristic;
+}
+
+bool v20_choose_v19_heuristic(int M, int N, int K) {
+    constexpr int BM = 128;
+    constexpr int BN = 256;
+    constexpr int NUM_SM = 128;
+
+    if ((M % BM) != 0 || (N % BN) != 0 || (K % 64) != 0) {
+        return false;
+    }
+
+    int tiles_m = M / BM;
+    int tiles_n = N / BN;
+    int total_tiles = tiles_m * tiles_n;
+    int tail_tiles = total_tiles % NUM_SM;
+
+    if (total_tiles < (NUM_SM / 2)) {
+        return true;
+    }
+    if (total_tiles <= NUM_SM) {
+        return false;
+    }
+    if (tail_tiles == 0) {
+        return false;
+    }
+
+    float tail_ratio = static_cast<float>(tail_tiles) / static_cast<float>(NUM_SM);
+    bool small_tail_wave = tail_ratio <= 0.35f;
+    bool shallow_problem = total_tiles <= 2 * NUM_SM;
+    bool long_k = K >= 2048;
+    return (small_tail_wave && long_k) || shallow_problem;
+}
+
+} // namespace
 
 const char* gemm_cuda_version_feature_name(int version) {
     switch (version) {
@@ -38,6 +97,9 @@ const char* gemm_cuda_version_feature_name(int version) {
         case 15: return "wgmma_tma_warpspecialized_ptxbarrier_tmastore_hilbert_stmatrix_padded_nocluster_nopersistent";
         case 16: return "wgmma_tma_warpspecialized_persistent_ptxbarrier_tmastore_hilbert_stmatrix_padded_nocluster_linearschedule";
         case 17: return "wgmma_tma_warpgroup_ptxbarrier";
+        case 18: return "wgmma_tma_warpgroup_warpspecialized_persistent_stmatrix";
+        case 19: return "wgmma_tma_warpgroup_warpspecialized_persistent_hilbert";
+        case 20: return "decomposition_heuristic_v15_v19";
         default: return "unknown";
     }
 }
@@ -137,9 +199,37 @@ void gemm(const __half* A, const __half* B, __half* C,
             // V17: V3 warpgroup + PTX mbarrier sync (SM90 Hopper, RC mode only)
             gemm_v17_wgmma_tma_warpgroup_ptxbarrier_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
             break;
+        case 18:
+            // V18: V5 + stmatrix epilogue (SM90 Hopper, RC mode only)
+            gemm_v18_wgmma_tma_warpgroup_warpspecialized_persistent_stmatrix_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            break;
+        case 19:
+            // V19: V5 + Hilbert scheduling (SM90 Hopper, RC mode only)
+            gemm_v19_wgmma_tma_warpgroup_warpspecialized_persistent_hilbert_fp16(A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            break;
+        case 20: {
+            // V20: decomposition scheduler (Heuristic/DataParallel/PersistentHilbert)
+            // Combines existing kernels: v15 (data-parallel) and v19 (persistent hilbert)
+            V20DecompositionMode mode = get_v20_mode();
+            bool use_v19 = false;
+            if (mode == V20DecompositionMode::PersistentHilbert) {
+                use_v19 = true;
+            } else if (mode == V20DecompositionMode::Heuristic) {
+                use_v19 = v20_choose_v19_heuristic(M, N, K);
+            }
+
+            if (use_v19) {
+                gemm_v19_wgmma_tma_warpgroup_warpspecialized_persistent_hilbert_fp16(
+                    A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            } else {
+                gemm_v15_wgmma_tma_warpspecialized_ptxbarrier_tmastore_hilbert_stmatrix_padded_nocluster_nopersistent_fp16(
+                    A, B, C, M, N, K, lhs_format, rhs_format, stream);
+            }
+            break;
+        }
         default:
             fprintf(stderr, "ERROR: Unsupported CUDA version %d\n", version);
-            fprintf(stderr, "       Available: 1-17\n");
+            fprintf(stderr, "       Available: 1-20\n");
             return;
     }
 }

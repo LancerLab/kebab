@@ -447,6 +447,7 @@ void gemm_v15_wgmma_tma_warpspecialized_ptxbarrier_tmastore_hilbert_stmatrix_pad
     size_t sMemSize = sizeof(SMemV15<V15_BM, V15_BN, V15_BK, V15_QSIZE>);
     auto kernel = gemm_v15_stmatrix_nocluster_kernel<V15_BM, V15_BN, V15_BK, V15_NUM_THREADS, V15_QSIZE>;
     cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, sMemSize);
+    cudaFuncSetAttribute(kernel, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
     kernel<<<total_blocks, V15_NUM_THREADS, sMemSize, stream>>>(
         M, N, K, v15_tma_map_C, v15_tma_map_A, v15_tma_map_B, v15_dspace);
 }

@@ -315,6 +315,7 @@ void gemm_v17_wgmma_tma_warpgroup_ptxbarrier_fp16(const __half* A, const __half*
     auto kernel = gemm_v17_warpgroup_ptxbarrier_kernel<V17_BM, V17_BN, V17_BK, V17_NUM_THREADS>;
 
     cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, sMemSize);
+    cudaFuncSetAttribute(kernel, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
     dim3 grid((M / V17_BM) * (N / V17_BN));
     kernel<<<grid, V17_NUM_THREADS, sMemSize, stream>>>(

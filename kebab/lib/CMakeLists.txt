@@ -26,6 +26,8 @@ add_library(kebab_cuda
     cuda/cuda_gemm_v15_wgmma_tma_warpspecialized_ptxbarrier_tmastore_hilbert_stmatrix_padded_nocluster_nopersistent.cu
     cuda/cuda_gemm_v16_wgmma_tma_warpspecialized_persistent_ptxbarrier_tmastore_hilbert_stmatrix_padded_nocluster_linearschedule.cu
     cuda/cuda_gemm_v17_wgmma_tma_warpgroup_ptxbarrier.cu
+    cuda/cuda_gemm_v18_wgmma_tma_warpgroup_warpspecialized_persistent_stmatrix.cu
+    cuda/cuda_gemm_v19_wgmma_tma_warpgroup_warpspecialized_persistent_hilbert.cu
 )
 target_include_directories(kebab_cuda PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(kebab_cuda CUDA::cublas CUDA::cuda_driver)

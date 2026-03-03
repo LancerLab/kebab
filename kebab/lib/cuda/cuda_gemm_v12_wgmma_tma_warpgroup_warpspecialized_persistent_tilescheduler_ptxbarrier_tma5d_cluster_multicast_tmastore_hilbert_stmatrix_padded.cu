@@ -510,6 +510,7 @@ void gemm_v12_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxba
     size_t sMemSize = sizeof(SMemV12<V12_BM, V12_BN, V12_BK, V12_QSIZE>);
     auto kernel = gemm_v12_stmatrix_kernel<V12_BM, V12_BN, V12_BK, V12_NUM_THREADS, V12_QSIZE, V12_NUM_SM, V12_CLUSTER_M, V12_CLUSTER_N>;
     cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, sMemSize);
+    cudaFuncSetAttribute(kernel, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
     kernel<<<V12_NUM_SM, V12_NUM_THREADS, sMemSize, stream>>>(
         M, N, K, v12_tma_map_C, v12_tma_map_A, v12_tma_map_B, v12_dspace);
 }
@@ -850,6 +851,7 @@ void gemm_v12_wgmma_tma_warpgroup_warpspecialized_persistent_tilescheduler_ptxba
     size_t sMemSize = sizeof(SMemV12_BF16<V12_BM, V12_BN, V12_BK, V12_QSIZE>);
     auto kernel = gemm_v12_stmatrix_kernel_bf16<V12_BM, V12_BN, V12_BK, V12_NUM_THREADS, V12_QSIZE, V12_NUM_SM, V12_CLUSTER_M, V12_CLUSTER_N>;
     cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, sMemSize);
+    cudaFuncSetAttribute(kernel, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
     kernel<<<V12_NUM_SM, V12_NUM_THREADS, sMemSize, stream>>>(
         M, N, K, v12_tma_map_C_bf16, v12_tma_map_A_bf16, v12_tma_map_B_bf16, v12_dspace_bf16);
 }

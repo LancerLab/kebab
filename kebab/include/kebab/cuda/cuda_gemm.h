@@ -195,6 +195,37 @@ void gemm_v17_wgmma_tma_warpgroup_ptxbarrier_fp16(const __half* A, const __half*
                                                   int M, int N, int K, char lhs_format, char rhs_format,
                                                   cudaStream_t stream);
 
+/**
+ * @brief V18: V5 + stmatrix epilogue (RC mode, SM90 Hopper required)
+ * Simple persistent warpgroup kernel with padded shared-memory stmatrix stores.
+ */
+void gemm_v18_wgmma_tma_warpgroup_warpspecialized_persistent_stmatrix_fp16(
+    const __half* A, const __half* B, __half* C,
+    int M, int N, int K, char lhs_format, char rhs_format,
+    cudaStream_t stream);
+
+/**
+ * @brief V19: V5 + Hilbert scheduling (RC mode, SM90 Hopper required)
+ * Persistent warpgroup kernel with Hilbert curve tile ordering.
+ */
+void gemm_v19_wgmma_tma_warpgroup_warpspecialized_persistent_hilbert_fp16(
+    const __half* A, const __half* B, __half* C,
+    int M, int N, int K, char lhs_format, char rhs_format,
+    cudaStream_t stream);
+
+/**
+ * @brief V20: decomposition scheduler (RC mode, SM90 Hopper required)
+ * Host-side decomposition mode over existing kernels:
+ * - DataParallel path: v15
+ * - PersistentHilbert path: v19
+ * - Heuristic path: choose between v15 and v19 based on wave/tail shape
+ *
+ * Runtime mode override via env var `KEBAB_V20_MODE`:
+ * - `heuristic` (default)
+ * - `dp` / `dataparallel` / `v15`
+ * - `persistent` / `hilbert` / `v19`
+ */
+
 // ============================================================================
 // BFloat16 kernel declarations (bf16 input/output, FP32 accumulation)
 // ============================================================================

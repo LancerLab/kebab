@@ -431,6 +431,7 @@ void gemm_v14_wgmma_tma_warpspecialized_persistent_ptxbarrier_tmastore_hilbert_s
     size_t sMemSize = sizeof(SMemV14<V14_BM, V14_BN, V14_BK, V14_QSIZE>);
     auto kernel = gemm_v14_stmatrix_nocluster_kernel<V14_BM, V14_BN, V14_BK, V14_NUM_THREADS, V14_QSIZE>;
     cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, sMemSize);
+    cudaFuncSetAttribute(kernel, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
     kernel<<<V14_NUM_SM, V14_NUM_THREADS, sMemSize, stream>>>(
         M, N, K, v14_tma_map_C, v14_tma_map_A, v14_tma_map_B, v14_dspace);
 }
