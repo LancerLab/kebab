@@ -165,7 +165,8 @@ template<typename T>
 inline bool verifyCublasGemm(const T* d_A, const T* d_B, const T* d_C_test,
                               int M, int N, int K,
                               char lhs_format, char rhs_format,
-                              float tolerance, bool verbose = false) {
+                              float tolerance, bool verbose = false,
+                              bool transpose_output = false) {
     // Allocate reference result
     T* d_C_ref;
     CUDA_CHECK(cudaMalloc(&d_C_ref, M * N * sizeof(T)));
@@ -181,7 +182,18 @@ inline bool verifyCublasGemm(const T* d_A, const T* d_B, const T* d_C_test,
 
     // Copy to host for comparison
     std::vector<T> h_C_test(M * N), h_C_ref(M * N);
-    CUDA_CHECK(cudaMemcpy(h_C_test.data(), d_C_test, M * N * sizeof(T), cudaMemcpyDeviceToHost));
+    if (transpose_output) {
+        // kernel output is row-major; transpose into column-major order for comparison
+        std::vector<T> tmp(M * N);
+        CUDA_CHECK(cudaMemcpy(tmp.data(), d_C_test, M * N * sizeof(T), cudaMemcpyDeviceToHost));
+        for (int i = 0; i < M; ++i) {
+            for (int j = 0; j < N; ++j) {
+                h_C_test[j * M + i] = tmp[i * N + j];
+            }
+        }
+    } else {
+        CUDA_CHECK(cudaMemcpy(h_C_test.data(), d_C_test, M * N * sizeof(T), cudaMemcpyDeviceToHost));
+    }
     CUDA_CHECK(cudaMemcpy(h_C_ref.data(), d_C_ref, M * N * sizeof(T), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaFree(d_C_ref));
 

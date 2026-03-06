@@ -214,10 +214,10 @@ void gemm_v19_wgmma_tma_warpgroup_warpspecialized_persistent_hilbert_fp16(
     cudaStream_t stream);
 
 /**
- * @brief V40: V4 event-count fix variant (RC mode, SM90 Hopper required)
- * full barrier expects producer thread only; empty barrier expects all consumer threads.
+ * @brief V41: V4-derived kernel with row-major output (RC mode, SM90 Hopper required)
+ * identical to V4 except that C is written row-major instead of column-major.
  */
-void gemm_v40_wgmma_tma_warpgroup_warpspecialized_eventfix_fp16(
+void gemm_v41_wgmma_tma_warpgroup_warpspecialized_fp16(
     const __half* A, const __half* B, __half* C,
     int M, int N, int K, char lhs_format, char rhs_format,
     cudaStream_t stream);

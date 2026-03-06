@@ -162,7 +162,7 @@ constexpr int V4_BM = 64;
 constexpr int V4_BN = 128;
 constexpr int V4_BK = 64;
 constexpr int V4_NUM_THREADS = 256;  // 2 warp-groups: 1 producer + 1 consumer
-constexpr int V4_QSIZE = 1;          // Pipeline depth
+constexpr int V4_QSIZE = 4;          // Pipeline depth
 
 // Shared memory structure with pipeline stages
 template <int BM, int BN, int BK, int QSIZE>

@@ -105,7 +105,8 @@ void runOnceGEMMCuda(const ConfigParser& config) {
     // Verification using shared cuBLAS reference (same as bench_gemm)
     std::cout << "\nVerifying result against cuBLAS reference..." << std::endl;
     float tolerance = getVerificationTolerance<T>(size);
-    bool passed = verifyCublasGemm(d_A, d_B, d_C, M, N, K, lhs_format, rhs_format, tolerance, true);
+    bool passed = verifyCublasGemm(d_A, d_B, d_C, M, N, K, lhs_format, rhs_format, tolerance, true,
+                                     version == 41);
 
     std::cout << "\nReady for profiling analysis." << std::endl;
 

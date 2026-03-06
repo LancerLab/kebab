@@ -37,11 +37,12 @@ using namespace kebab::config;
 template<typename T>
 bool verifyGEMM(const T* A, const T* B, const T* C_test, int M, int N, int K,
                 const std::string& opmode, float tolerance = 1e-3f,
-                bool /* transpose_compare */ = false) {
+                bool transpose_compare = false) {
     char lhs_format = (opmode.length() >= 1) ? opmode[0] : 'R';
     char rhs_format = (opmode.length() >= 2) ? opmode[1] : 'R';
     // Use shared verification function (verbose=false for benchmark)
-    return verifyCublasGemm(A, B, C_test, M, N, K, lhs_format, rhs_format, tolerance, false);
+    return verifyCublasGemm(A, B, C_test, M, N, K, lhs_format, rhs_format, tolerance, false,
+                            transpose_compare);
 }
 
 /**
@@ -272,7 +273,8 @@ void benchmarkGEMM(const ConfigParser& config) {
 
                     // Verify first
                     kernel();
-                    bool correct = verifyGEMM(d_A, d_B, d_C, M, N, K, opmode, tolerance, false);
+                    bool correct = verifyGEMM(d_A, d_B, d_C, M, N, K, opmode, tolerance,
+                                               version == 41);
 
                     if (correct) {
                         CUDA_CHECK(cudaMemset(d_C, 0, M * N * sizeof(T)));
