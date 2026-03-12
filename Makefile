@@ -1,5 +1,5 @@
-# CuTeKernelLib Makefile
-# High-performance kernel library using NVIDIA CUTLASS CuTe
+# Kebab Makefile
+# Hopper GEMM kernels and microbenchmarks
 
 .PHONY: all setup build clean help test gpu-info gpu-reset
 
@@ -49,7 +49,7 @@ OPERATORS_TGT := $(subst _,-,$(OPERATORS))
 MICROBENCHS := copy_gmem_to_smem mma_wgmma mma_mma_sync mma_wmma_sync \
 copy_gmem_to_smem_2d_cp_async copy_gmem_to_smem_2d_tma_cde copy_gmem_to_smem_2d_tiling \
 copy_gmem_to_smem_2d_tma_ptx copy_gmem_to_smem_2d_tma_cute wgmma_descriptor_info \
-hgemm
+hgemm sparse_mma cutlass_meta_probe
 # Convert underscores to hyphens for target names
 MICROBENCHS_TGT := $(subst _,-,$(MICROBENCHS))
 
@@ -277,7 +277,7 @@ all: help
 
 help:
 	@echo "=========================================="
-	@echo "CuTeKernelLib Build System"
+	@echo "Kebab Build System"
 	@echo "=========================================="
 	@echo "Detected Configuration:"
 	@echo "  OS:           $(OS)"
@@ -431,7 +431,7 @@ gpu-reset:
 
 setup:
 	@echo "=========================================="
-	@echo "Setting up CuTeKernelLib dependencies..."
+	@echo "Setting up Kebab dependencies..."
 	@echo "=========================================="
 	@echo ""
 	@echo "[1/4] Creating directory structure..."
@@ -1472,17 +1472,3 @@ clean:
 	@$(RM) $(PROFILING_DIR)/*.ncu-rep
 	@$(RM) $(PROFILING_DIR)/*.txt
 	@echo "Clean complete."
-
-# ==========================================================================
-# Sparse WMMA demo (Hopper, 2:4)
-# ==========================================================================
-.PHONY: sparse_mma_demo
-sparse_mma_demo:
-	$(NVCC) $(filter-out -arch=$(CUDA_ARCH),$(NVCC_FLAGS)) -arch=sm_90 sparse_mma_demo.cu -o sparse_mma_demo
-
-# ==========================================================================
-# CUTLASS metadata host encoder probe
-# ==========================================================================
-.PHONY: cutlass_meta_probe
-cutlass_meta_probe:
-	$(NVCC) $(filter-out -arch=$(CUDA_ARCH),$(NVCC_FLAGS)) -arch=sm_90 cutlass_meta_probe.cu -o cutlass_meta_probe

@@ -102,3 +102,21 @@ target_include_directories(mbench_hgemm PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(mbench_hgemm microbench_common kebab_cute CUDA::cudart)
 set_target_properties(mbench_hgemm PROPERTIES CUDA_ARCHITECTURES 90a)
 target_compile_options(mbench_hgemm PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-arch=sm_90a --expt-relaxed-constexpr>)
+
+# Hopper sparse MMA experiment
+add_executable(mbench_sparse_mma
+    sparse_mma.cu
+)
+target_include_directories(mbench_sparse_mma PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(mbench_sparse_mma microbench_common CUDA::cudart)
+set_target_properties(mbench_sparse_mma PROPERTIES CUDA_ARCHITECTURES 90)
+target_compile_options(mbench_sparse_mma PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-arch=sm_90>)
+
+# CUTLASS metadata packing probe
+add_executable(mbench_cutlass_meta_probe
+    cutlass_meta_probe.cu
+)
+target_include_directories(mbench_cutlass_meta_probe PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(mbench_cutlass_meta_probe microbench_common CUDA::cudart)
+set_target_properties(mbench_cutlass_meta_probe PROPERTIES CUDA_ARCHITECTURES 90)
+target_compile_options(mbench_cutlass_meta_probe PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-arch=sm_90>)
